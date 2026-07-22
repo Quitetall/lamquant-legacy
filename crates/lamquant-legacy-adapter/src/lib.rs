@@ -275,6 +275,13 @@ pub fn handle(request: ProcessRequest) -> ProcessResponse {
 }
 
 fn read_bounded(path: &Path, max_source_bytes: u64) -> Result<Vec<u8>, LegacyError> {
+    #[cfg(not(unix))]
+    {
+        let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+        if metadata.file_type().is_symlink() {
+            return Err(LegacyError::UnsafeSource);
+        }
+    }
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -299,7 +306,10 @@ fn read_bounded(path: &Path, max_source_bytes: u64) -> Result<Vec<u8>, LegacyErr
     let capacity = usize::try_from(metadata.len().min(max_source_bytes))
         .map_err(|_| LegacyError::SourceTooLarge)?;
     let mut bytes = Vec::with_capacity(capacity);
-    file.take(max_source_bytes.saturating_add(1))
+    let read_limit = max_source_bytes
+        .checked_add(1)
+        .ok_or(LegacyError::SourceTooLarge)?;
+    file.take(read_limit)
         .read_to_end(&mut bytes)
         .map_err(io_error)?;
     if u64::try_from(bytes.len()).map_err(|_| LegacyError::SourceTooLarge)? > max_source_bytes {

@@ -1,13 +1,15 @@
 use lamquant_legacy_adapter::{handle, LegacyError, ProcessRequest, ProcessResponse};
 use std::io::{self, Read};
 
+const MAX_PROCESS_REQUEST_BYTES: usize = 1024 * 1024;
+
 fn run() -> Result<ProcessResponse, LegacyError> {
     let mut input = Vec::new();
     io::stdin()
-        .take(1024 * 1024 + 1)
+        .take((MAX_PROCESS_REQUEST_BYTES + 1) as u64)
         .read_to_end(&mut input)
         .map_err(|error| LegacyError::InvalidProtocol(error.to_string()))?;
-    if input.len() > 1024 * 1024 {
+    if input.len() > MAX_PROCESS_REQUEST_BYTES {
         return Err(LegacyError::InvalidProtocol(
             "request exceeds 1 MiB protocol limit".to_owned(),
         ));
