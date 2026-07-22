@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "activated_at": "2026-07-22T08:00:00Z",
+  "activation_path": ".provenance-policy.json",
+  "merge_commits": "first-parent",
+  "scope": "lamquant-legacy repository"
+}

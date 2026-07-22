@@ -1,0 +1,12 @@
+{
+  "schema": "lamquant.legacy-converter-matrix/v1",
+  "profiles": [
+    "legacy.bcs1.v1", "legacy.lml1.v1", "legacy.lma.v1", "legacy.lma.v2",
+    "legacy.lmqc.v1", "legacy.lmlcrypt.v1", "legacy.lqtp.v1",
+    "legacy.lqtp.v2", "legacy.lqtp.v3"
+  ],
+  "forensic_import": "PASS",
+  "semantic_import": "NOT_CLAIMED",
+  "reverse_export": "NOT_CLAIMED",
+  "source_overwrite": false
+}
