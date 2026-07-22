@@ -20,7 +20,7 @@ abir-adapter = { path = "../abir/crates/abir-adapter", version = "=0.1.0" }
 blake3 = { version = "=1.5.5", default-features = false }
 bytemuck = "=1.25.0"
 lamquant-legacy-ir = { path = "crates/lamquant-legacy-ir", version = "=0.1.1" }
-lamquant-lml-legacy = { path = "crates/lamquant-lml-legacy", version = "=0.1.1", default-features = false, features = ["legacy-decode"] }
+lamquant-lml-legacy = { path = "crates/lamquant-lml-legacy", version = "=0.1.1", default-features = false, features = ["legacy-decode", "legacy-encode"] }
 lamquant-lml-mcu = { path = "../codec-lossless/lamquant-lml-mcu", version = "=0.9.3", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

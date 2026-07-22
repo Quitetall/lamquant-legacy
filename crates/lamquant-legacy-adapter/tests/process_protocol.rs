@@ -1,6 +1,7 @@
 use lamquant_legacy_adapter::{
-    capability_manifest, convert_forensic, detect_format, import_semantic, ConvertRequest,
-    LegacyError, LegacyFormat, SemanticImportRequest,
+    capability_manifest, convert_forensic, detect_format, export_semantic, import_semantic,
+    ConvertRequest, ExportPayload, LegacyError, LegacyFormat, SemanticExportRequest,
+    SemanticImportRequest,
 };
 use lamquant_legacy_ir::{Bcs1Header, BCS1_VERSION_MAJOR, BCS1_VERSION_MINOR, CODEC_LML_53};
 use std::fs;
@@ -223,6 +224,125 @@ fn lml1_semantic_import_is_real_but_does_not_invent_modality() {
 }
 
 #[test]
+fn semantic_reverse_export_is_bounded_atomic_idempotent_and_sample_exact() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("input.bcs1");
+    let imported_dir = temp.path().join("imported");
+    fs::write(&source, bcs1_source()).unwrap();
+    let imported = import_semantic(&SemanticImportRequest {
+        source,
+        destination: imported_dir.clone(),
+        accept_fidelity: true,
+        max_source_bytes: 1024 * 1024,
+        max_decoded_bytes: 1024 * 1024,
+    })
+    .unwrap();
+
+    for format in [LegacyFormat::Bcs1, LegacyFormat::Lml1] {
+        let destination = temp.path().join(format!("export-{format:?}"));
+        let request = SemanticExportRequest {
+            format,
+            dataset: imported_dir.join("dataset.json"),
+            payloads: vec![ExportPayload {
+                content_id: imported.payload_content_id.clone(),
+                path: imported_dir.join("payload.i64le"),
+            }],
+            destination: destination.clone(),
+            accept_fidelity: true,
+            max_dataset_bytes: 1024 * 1024,
+            max_payload_bytes: 1024 * 1024,
+            max_output_bytes: 1024 * 1024,
+            window_size: 5,
+        };
+        let first = export_semantic(&request).unwrap();
+        let second = export_semantic(&request).unwrap();
+        assert_eq!(first, second);
+        assert!(first.exact_sample_values);
+        assert!(!first.semantic_equivalence);
+        assert!(first.accepted_projection);
+        let output = fs::read(destination.join("legacy-output.bin")).unwrap();
+        assert_eq!(detect_format(&output).unwrap(), format);
+
+        let encoded = temp.path().join(format!("verify-{format:?}.bin"));
+        fs::write(&encoded, output).unwrap();
+        let closure = import_semantic(&SemanticImportRequest {
+            source: encoded,
+            destination: temp.path().join(format!("closure-{format:?}")),
+            accept_fidelity: true,
+            max_source_bytes: 1024 * 1024,
+            max_decoded_bytes: 1024 * 1024,
+        })
+        .unwrap();
+        assert_eq!(closure.decoded_channels, 2);
+        assert_eq!(closure.decoded_samples_per_channel, 5);
+        assert!(closure.exact_sample_values);
+    }
+}
+
+#[test]
+fn semantic_reverse_export_fails_before_output_on_acceptance_bounds_or_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("input.bcs1");
+    let imported_dir = temp.path().join("imported");
+    fs::write(&source, bcs1_source()).unwrap();
+    let imported = import_semantic(&SemanticImportRequest {
+        source,
+        destination: imported_dir.clone(),
+        accept_fidelity: true,
+        max_source_bytes: 1024 * 1024,
+        max_decoded_bytes: 1024 * 1024,
+    })
+    .unwrap();
+    let destination = temp.path().join("export");
+    let mut request = SemanticExportRequest {
+        format: LegacyFormat::Bcs1,
+        dataset: imported_dir.join("dataset.json"),
+        payloads: vec![ExportPayload {
+            content_id: imported.payload_content_id,
+            path: imported_dir.join("payload.i64le"),
+        }],
+        destination: destination.clone(),
+        accept_fidelity: false,
+        max_dataset_bytes: 1024 * 1024,
+        max_payload_bytes: 1024 * 1024,
+        max_output_bytes: 1024 * 1024,
+        window_size: 5,
+    };
+    assert_eq!(
+        export_semantic(&request).unwrap_err(),
+        LegacyError::AcceptanceRequired
+    );
+    assert!(!destination.exists());
+
+    request.accept_fidelity = true;
+    request.max_payload_bytes = 1;
+    assert_eq!(
+        export_semantic(&request).unwrap_err(),
+        LegacyError::DecodedTooLarge
+    );
+    assert!(!destination.exists());
+
+    request.max_payload_bytes = 1024 * 1024;
+    request.payloads.push(ExportPayload {
+        content_id: "unused".to_owned(),
+        path: imported_dir.join("payload.i64le"),
+    });
+    assert_eq!(
+        export_semantic(&request).unwrap_err(),
+        LegacyError::SemanticExportUnsupported
+    );
+    assert!(!destination.exists());
+
+    request.payloads.pop();
+    fs::write(&request.payloads[0].path, vec![0; 80]).unwrap();
+    assert_eq!(
+        export_semantic(&request).unwrap_err(),
+        LegacyError::PayloadIdentityMismatch
+    );
+    assert!(!destination.exists());
+}
+
+#[test]
 fn semantic_import_bounds_decoded_allocation_before_output() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("input.bcs1");
@@ -309,9 +429,14 @@ fn committed_converter_matrix_scopes_semantic_claims_per_profile() {
     let matrix: serde_json::Value =
         serde_json::from_slice(include_bytes!("../../../converter-matrix.json")).unwrap();
     assert_eq!(matrix["semantic_import"], "PARTIAL");
+    assert_eq!(matrix["reverse_export"], "PARTIAL");
     assert_eq!(
         matrix["semantic_profiles"]["legacy.bcs1.v1"]["status"],
         "PASS_PROJECTED"
+    );
+    assert_eq!(
+        matrix["semantic_profiles"]["legacy.bcs1.v1"]["reverse_export"],
+        "PASS_PROJECTED_EXACT_SAMPLES"
     );
     assert_eq!(
         matrix["semantic_profiles"]["legacy.lma.v1"]["status"],

@@ -13,7 +13,7 @@
       "sample_values": "EXACT",
       "source_capsule": "EXACT",
       "metadata": "QUARANTINED",
-      "reverse_export": "NOT_CLAIMED"
+      "reverse_export": "PASS_PROJECTED_EXACT_SAMPLES"
     },
     "legacy.lml1.v1": {
       "status": "PASS_PROJECTED",
@@ -21,7 +21,7 @@
       "source_capsule": "EXACT",
       "metadata": "QUARANTINED",
       "modality": "UNKNOWN_AT_SOURCE",
-      "reverse_export": "NOT_CLAIMED"
+      "reverse_export": "PASS_PROJECTED_EXACT_SAMPLES"
     },
     "legacy.lma.v1": {"status": "NOT_CLAIMED"},
     "legacy.lma.v2": {"status": "NOT_CLAIMED"},
@@ -31,6 +31,6 @@
     "legacy.lqtp.v2": {"status": "NOT_CLAIMED"},
     "legacy.lqtp.v3": {"status": "NOT_CLAIMED"}
   },
-  "reverse_export": "NOT_CLAIMED",
+  "reverse_export": "PARTIAL",
   "source_overwrite": false
 }

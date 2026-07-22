@@ -1,11 +1,11 @@
 #![forbid(unsafe_code)]
 
 use abir::{
-    canonical_debug_json, logical_content_id, payload_content_id, Atom, AtomTag, ByteOrder, Clock,
-    ClockTag, ConceptId, DatasetDraft, DatasetTag, ElementType, Fidelity, FidelityKind, Layout,
-    ObjectId, PayloadDescriptor, Presence, Rational, Recording, RecordingTag, SemanticAxis,
-    SemanticRef, SignalBlock, SourceCapsule, SourceKey, Stream, StreamTag, Tensor, TimeAxis,
-    TimeSegment, ValidationLimits,
+    canonical_debug_json, logical_content_id, parse_canonical_dataset, payload_content_id,
+    verify_payload_content, Atom, AtomTag, ByteOrder, Clock, ClockTag, ConceptId, DatasetDraft,
+    DatasetTag, ElementType, Fidelity, FidelityKind, Layout, ObjectId, PayloadDescriptor, Presence,
+    Rational, Recording, RecordingTag, SemanticAxis, SemanticRef, SignalBlock, SourceCapsule,
+    SourceKey, Stream, StreamTag, Tensor, TimeAxis, TimeSegment, ValidationLimits,
 };
 use abir_adapter::{MappingDisposition, MappingEntry, MappingReport, ProfileId, SemanticCoverage};
 use lamquant_legacy_ir::{Bcs1Header, BCS1_VERSION_MAJOR, CODEC_LML_53};
@@ -24,6 +24,8 @@ const PAYLOAD_FILE: &str = "payload.i64le";
 const MAPPING_REPORT_FILE: &str = "mapping-report.json";
 const FIDELITY_REPORT_FILE: &str = "fidelity-report.json";
 const SEMANTIC_RECEIPT_FILE: &str = "semantic-receipt.json";
+const EXPORT_FILE: &str = "legacy-output.bin";
+const EXPORT_RECEIPT_FILE: &str = "export-receipt.json";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -55,6 +57,10 @@ impl LegacyFormat {
     }
 
     pub const fn supports_semantic_import(self) -> bool {
+        matches!(self, Self::Bcs1 | Self::Lml1)
+    }
+
+    pub const fn supports_reverse_export(self) -> bool {
         matches!(self, Self::Bcs1 | Self::Lml1)
     }
 }
@@ -127,6 +133,38 @@ pub struct SemanticImportReceipt {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ExportPayload {
+    pub content_id: String,
+    pub path: PathBuf,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SemanticExportRequest {
+    pub format: LegacyFormat,
+    pub dataset: PathBuf,
+    pub payloads: Vec<ExportPayload>,
+    pub destination: PathBuf,
+    pub accept_fidelity: bool,
+    pub max_dataset_bytes: u64,
+    pub max_payload_bytes: u64,
+    pub max_output_bytes: u64,
+    pub window_size: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SemanticExportReceipt {
+    pub profile: String,
+    pub dataset_content_id: String,
+    pub output_blake3: String,
+    pub output_bytes: u64,
+    pub decoded_channels: u64,
+    pub decoded_samples_per_channel: u64,
+    pub exact_sample_values: bool,
+    pub semantic_equivalence: bool,
+    pub accepted_projection: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SemanticFidelityReport {
     pub schema: String,
     pub source_profile: String,
@@ -178,6 +216,7 @@ pub enum ProcessRequest {
     },
     ConvertForensic(ConvertRequest),
     ImportSemantic(SemanticImportRequest),
+    ExportSemantic(SemanticExportRequest),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -187,6 +226,7 @@ pub enum ProcessResponse {
     OkInspection(Inspection),
     OkConversion(ConvertReceipt),
     OkSemanticImport(SemanticImportReceipt),
+    OkSemanticExport(SemanticExportReceipt),
     Error { code: String, message: String },
 }
 
@@ -196,7 +236,9 @@ pub enum LegacyError {
     SourceTooLarge,
     AcceptanceRequired,
     SemanticImportUnsupported,
+    SemanticExportUnsupported,
     DecodedTooLarge,
+    PayloadIdentityMismatch,
     MalformedContainer(String),
     SemanticValidation(String),
     UnsafeSource,
@@ -212,7 +254,9 @@ impl LegacyError {
             Self::SourceTooLarge => "source-too-large",
             Self::AcceptanceRequired => "acceptance-required",
             Self::SemanticImportUnsupported => "semantic-import-unsupported",
+            Self::SemanticExportUnsupported => "semantic-export-unsupported",
             Self::DecodedTooLarge => "decoded-output-too-large",
+            Self::PayloadIdentityMismatch => "payload-identity-mismatch",
             Self::MalformedContainer(_) => "malformed-container",
             Self::SemanticValidation(_) => "semantic-validation",
             Self::UnsafeSource => "unsafe-source",
@@ -234,8 +278,14 @@ impl fmt::Display for LegacyError {
             Self::SemanticImportUnsupported => formatter.write_str(
                 "retired profile has no current semantic importer; forensic import remains available",
             ),
+            Self::SemanticExportUnsupported => formatter.write_str(
+                "current ABIR semantics cannot be represented by the requested retired profile",
+            ),
             Self::DecodedTooLarge => {
                 formatter.write_str("decoded signal exceeds declared byte limit")
+            }
+            Self::PayloadIdentityMismatch => {
+                formatter.write_str("payload bytes do not match their ABIR ContentId")
             }
             Self::MalformedContainer(message) => write!(formatter, "malformed container: {message}"),
             Self::SemanticValidation(message) => {
@@ -305,7 +355,7 @@ pub fn capability_manifest() -> CapabilityManifest {
                 inspect: true,
                 forensic_import: true,
                 semantic_import: format.supports_semantic_import(),
-                reverse_export: false,
+                reverse_export: format.supports_reverse_export(),
             })
             .collect(),
     }
@@ -420,6 +470,302 @@ pub fn import_semantic(
         std::mem::forget(temporary);
     }
     result
+}
+
+pub fn export_semantic(
+    request: &SemanticExportRequest,
+) -> Result<SemanticExportReceipt, LegacyError> {
+    if !request.accept_fidelity {
+        return Err(LegacyError::AcceptanceRequired);
+    }
+    if !request.format.supports_reverse_export() {
+        return Err(LegacyError::SemanticExportUnsupported);
+    }
+    let dataset_bytes = read_bounded(&request.dataset, request.max_dataset_bytes)?;
+    let dataset = parse_canonical_dataset(&dataset_bytes)
+        .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?;
+    if canonical_debug_json(&dataset)
+        .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?
+        != dataset_bytes
+    {
+        return Err(LegacyError::SemanticValidation(
+            "dataset input is not canonical ABIR JSON".to_owned(),
+        ));
+    }
+    let (signal, sample_rate, modality_tag) =
+        resolve_export_signal(&dataset, &request.payloads, request.max_payload_bytes)?;
+    let window_size =
+        usize::try_from(request.window_size).map_err(|_| LegacyError::SemanticExportUnsupported)?;
+    if window_size == 0 {
+        return Err(LegacyError::SemanticExportUnsupported);
+    }
+
+    let scratch = tempfile::tempdir().map_err(io_error)?;
+    let lml_path = scratch.path().join("encoded.lml");
+    lamquant_lml_legacy::container::write_file(
+        &lml_path,
+        &signal,
+        sample_rate,
+        window_size,
+        0,
+        "{}",
+    )
+    .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+    let lml = read_bounded(&lml_path, request.max_output_bytes)?;
+    let output = match request.format {
+        LegacyFormat::Lml1 => lml,
+        LegacyFormat::Bcs1 => lml1_as_bcs1(&lml, modality_tag)?,
+        _ => return Err(LegacyError::SemanticExportUnsupported),
+    };
+    if u64::try_from(output.len()).map_err(|_| LegacyError::SourceTooLarge)?
+        > request.max_output_bytes
+    {
+        return Err(LegacyError::SourceTooLarge);
+    }
+    let decoded_source = decode_source(&output, request.format)?;
+    let decoded = lamquant_lml_legacy::container::read_bytes(&decoded_source)
+        .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?
+        .0;
+    if decoded != signal {
+        return Err(LegacyError::MalformedContainer(
+            "reverse-export verification changed sample values".to_owned(),
+        ));
+    }
+    let receipt = SemanticExportReceipt {
+        profile: request.format.profile().to_owned(),
+        dataset_content_id: logical_content_id(&dataset)
+            .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?
+            .to_string(),
+        output_blake3: blake3::hash(&output).to_hex().to_string(),
+        output_bytes: output.len() as u64,
+        decoded_channels: signal.len() as u64,
+        decoded_samples_per_channel: signal.first().map_or(0, Vec::len) as u64,
+        exact_sample_values: true,
+        semantic_equivalence: false,
+        accepted_projection: true,
+    };
+    let receipt_bytes = serde_json::to_vec_pretty(&receipt)
+        .map_err(|error| LegacyError::InvalidProtocol(error.to_string()))?;
+    if request.destination.exists() {
+        return verify_existing_export(&request.destination, &output, &receipt_bytes, &receipt);
+    }
+    let parent = request
+        .destination
+        .parent()
+        .ok_or_else(|| LegacyError::Io("destination has no parent".to_owned()))?;
+    fs::create_dir_all(parent).map_err(io_error)?;
+    let temporary = tempfile::Builder::new()
+        .prefix(".lamquant-legacy-export-")
+        .tempdir_in(parent)
+        .map_err(io_error)?;
+    let result = (|| {
+        write_new(&temporary.path().join(EXPORT_FILE), &output)?;
+        write_new(&temporary.path().join(EXPORT_RECEIPT_FILE), &receipt_bytes)?;
+        fs::rename(temporary.path(), &request.destination).map_err(io_error)?;
+        Ok(receipt.clone())
+    })();
+    if result.is_ok() {
+        std::mem::forget(temporary);
+    }
+    result
+}
+
+fn resolve_export_signal(
+    dataset: &abir::AbirDataset,
+    payloads: &[ExportPayload],
+    max_payload_bytes: u64,
+) -> Result<(Vec<Vec<i64>>, f64, u8), LegacyError> {
+    if dataset.recordings().len() != 1 || dataset.streams().len() != 1 {
+        return Err(LegacyError::SemanticExportUnsupported);
+    }
+    let recording = &dataset.recordings()[0];
+    let stream = &dataset.streams()[0];
+    if recording.streams() != [stream.id()]
+        || stream.recording_id() != recording.id()
+        || stream.atoms().is_empty()
+        || stream.atoms().len() != dataset.atoms().len()
+    {
+        return Err(LegacyError::SemanticExportUnsupported);
+    }
+    let mut paths = std::collections::BTreeMap::new();
+    for payload in payloads {
+        if paths
+            .insert(payload.content_id.as_str(), payload.path.as_path())
+            .is_some()
+        {
+            return Err(LegacyError::InvalidProtocol(
+                "duplicate export payload ContentId".to_owned(),
+            ));
+        }
+    }
+    let mut total_payload_bytes = 0_u64;
+    let mut signal = Vec::new();
+    let mut used_payloads = std::collections::BTreeSet::new();
+    let mut rate = None;
+    let mut samples = None;
+    for atom_id in stream.atoms() {
+        let atom = dataset
+            .atoms()
+            .iter()
+            .find(|atom| atom.id() == *atom_id)
+            .ok_or(LegacyError::SemanticExportUnsupported)?;
+        let Atom::SignalBlock(block) = atom else {
+            return Err(LegacyError::SemanticExportUnsupported);
+        };
+        if atom.presence() != Presence::Present {
+            return Err(LegacyError::SemanticExportUnsupported);
+        }
+        let descriptor = atom
+            .payload()
+            .ok_or(LegacyError::SemanticExportUnsupported)?;
+        if descriptor.element() != ElementType::I64
+            || descriptor.byte_order() != ByteOrder::Little
+            || !matches!(descriptor.layout(), Layout::DenseRowMajor)
+            || descriptor
+                .encoding()
+                .is_some_and(|encoding| encoding.as_str() != "abir:encoding/raw")
+        {
+            return Err(LegacyError::SemanticExportUnsupported);
+        }
+        let TimeAxis::Regular(segment) = block.time_axis() else {
+            return Err(LegacyError::SemanticExportUnsupported);
+        };
+        if segment.start().parts() != (0, 1)
+            || rate
+                .replace(segment.rate())
+                .is_some_and(|prior| prior != segment.rate())
+            || samples
+                .replace(segment.samples())
+                .is_some_and(|prior| prior != segment.samples())
+        {
+            return Err(LegacyError::SemanticExportUnsupported);
+        }
+        let descriptor_id = descriptor.content_id().to_string();
+        let path = paths
+            .get(descriptor_id.as_str())
+            .copied()
+            .ok_or(LegacyError::PayloadIdentityMismatch)?;
+        used_payloads.insert(descriptor_id);
+        total_payload_bytes = total_payload_bytes
+            .checked_add(descriptor.logical_bytes())
+            .ok_or(LegacyError::DecodedTooLarge)?;
+        if total_payload_bytes > max_payload_bytes {
+            return Err(LegacyError::DecodedTooLarge);
+        }
+        let bytes = read_bounded(path, descriptor.logical_bytes())?;
+        verify_payload_content(descriptor, &bytes)
+            .map_err(|_| LegacyError::PayloadIdentityMismatch)?;
+        let values = bytes
+            .chunks_exact(8)
+            .map(|sample| i64::from_le_bytes(sample.try_into().expect("exact chunk")))
+            .collect::<Vec<_>>();
+        let channel_samples =
+            usize::try_from(segment.samples()).map_err(|_| LegacyError::DecodedTooLarge)?;
+        match descriptor.shape() {
+            [extent] if *extent == segment.samples() => signal.push(values),
+            [1, extent] if *extent == segment.samples() => signal.push(values),
+            [channels, extent]
+                if *extent == segment.samples()
+                    && usize::try_from(*channels)
+                        .ok()
+                        .and_then(|channels| channels.checked_mul(channel_samples))
+                        == Some(values.len()) =>
+            {
+                signal.extend(values.chunks_exact(channel_samples).map(<[i64]>::to_vec));
+            }
+            _ => return Err(LegacyError::SemanticExportUnsupported),
+        }
+    }
+    if used_payloads.len() != paths.len()
+        || signal.is_empty()
+        || signal.len() > u16::MAX as usize
+        || signal.first().map_or(0, Vec::len) > u32::MAX as usize
+    {
+        return Err(LegacyError::SemanticExportUnsupported);
+    }
+    let rate = rate.ok_or(LegacyError::SemanticExportUnsupported)?;
+    let (numerator, denominator) = rate.parts();
+    let millihz = numerator
+        .checked_mul(1000)
+        .filter(|value| *value > 0 && *value % denominator == 0)
+        .map(|value| value / denominator)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or(LegacyError::SemanticExportUnsupported)?;
+    Ok((
+        signal,
+        f64::from(millihz) / 1000.0,
+        modality_tag(stream.modality())?,
+    ))
+}
+
+fn modality_tag(modality: &ConceptId) -> Result<u8, LegacyError> {
+    match modality.as_str() {
+        "abir:modality/eeg" => Ok(0),
+        "legacy:modality/ieeg" => Ok(1),
+        "legacy:modality/ecog" => Ok(2),
+        "legacy:modality/seeg" => Ok(3),
+        "abir:modality/ecg" => Ok(4),
+        "abir:modality/emg" => Ok(5),
+        "abir:modality/eog" => Ok(6),
+        "legacy:modality/respiration" => Ok(7),
+        "legacy:modality/acceleration" => Ok(8),
+        "legacy:modality/other" => Ok(9),
+        "legacy:modality/untyped" | "legacy:modality/unknown-at-source" => Ok(255),
+        _ => Err(LegacyError::SemanticExportUnsupported),
+    }
+}
+
+fn lml1_as_bcs1(lml: &[u8], modality_tag: u8) -> Result<Vec<u8>, LegacyError> {
+    if lml.len() < 32 || &lml[..4] != b"LML1" {
+        return Err(LegacyError::MalformedContainer(
+            "legacy encoder did not emit LML1".to_owned(),
+        ));
+    }
+    let header = Bcs1Header {
+        version_major: BCS1_VERSION_MAJOR,
+        version_minor: 0,
+        modality_tag,
+        modality_source: 0,
+        codec_descriptor: CODEC_LML_53,
+        mode: 0,
+        tier: 0,
+        decode_capability: 0,
+        n_channels: u16::from_le_bytes([lml[6], lml[7]]),
+        n_windows: u16::from_le_bytes([lml[8], lml[9]]),
+        total_samples: u32::from_le_bytes([lml[10], lml[11], lml[12], lml[13]]),
+        window_size: u16::from_le_bytes([lml[14], lml[15]]),
+        sample_rate_mhz: u32::from_le_bytes([lml[16], lml[17], lml[18], lml[19]]),
+        bit_depth: lml[20],
+        flags: lml[21],
+        metadata_length: u32::from_le_bytes([lml[22], lml[23], lml[24], lml[25]]),
+    };
+    let mut output = Vec::with_capacity(lml.len() + 8);
+    output.extend_from_slice(&header.to_bytes());
+    output.extend_from_slice(&lml[32..]);
+    Ok(output)
+}
+
+fn verify_existing_export(
+    destination: &Path,
+    output: &[u8],
+    receipt_bytes: &[u8],
+    receipt: &SemanticExportReceipt,
+) -> Result<SemanticExportReceipt, LegacyError> {
+    let metadata =
+        fs::symlink_metadata(destination).map_err(|_| LegacyError::DestinationConflict)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(LegacyError::DestinationConflict);
+    }
+    if fs::read(destination.join(EXPORT_FILE)).ok().as_deref() == Some(output)
+        && fs::read(destination.join(EXPORT_RECEIPT_FILE))
+            .ok()
+            .as_deref()
+            == Some(receipt_bytes)
+    {
+        Ok(receipt.clone())
+    } else {
+        Err(LegacyError::DestinationConflict)
+    }
 }
 
 fn inspect_container(
@@ -879,6 +1225,9 @@ pub fn handle(request: ProcessRequest) -> ProcessResponse {
         }
         ProcessRequest::ImportSemantic(request) => {
             import_semantic(&request).map(ProcessResponse::OkSemanticImport)
+        }
+        ProcessRequest::ExportSemantic(request) => {
+            export_semantic(&request).map(ProcessResponse::OkSemanticExport)
         }
     };
     result.unwrap_or_else(|error| ProcessResponse::Error {

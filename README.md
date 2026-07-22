@@ -13,6 +13,13 @@ source as an exact capsule. It also writes explicit mapping and fidelity
 reports. Unversioned legacy metadata is quarantined, so the resulting coverage
 is honestly reported as `projected-semantic`, not full semantic equivalence.
 
+BCS1 and LML1 also expose `export-semantic`. It accepts canonical ABIR JSON and
+an explicit list of content-addressed payload files, admits only aligned,
+uniform-rate signed integer signal blocks, and writes an atomically committed
+legacy wire plus receipt. The process decodes its own output and compares every
+sample before commit. The receipt claims exact sample values, not full semantic
+equivalence; callers must explicitly accept that projection.
+
 The process accepts one JSON request on stdin and returns one JSON response on
 stdout. A semantic request has this shape:
 
@@ -30,6 +37,25 @@ stdout. A semantic request has this shape:
 The two limits are enforced before signal decoding. The destination is created
 atomically and never replaces an existing, different result. Repeating an
 identical request verifies every artifact and returns the same receipt.
+
+An export request names every payload rather than trusting directory layout:
+
+```json
+{
+  "operation": "export-semantic",
+  "format": "bcs1",
+  "dataset": "/input/dataset.json",
+  "payloads": [
+    {"content_id": "<abir-content-id>", "path": "/input/payload.i64le"}
+  ],
+  "destination": "/output/export",
+  "accept_fidelity": true,
+  "max_dataset_bytes": 1048576,
+  "max_payload_bytes": 4294967296,
+  "max_output_bytes": 4294967296,
+  "window_size": 2500
+}
+```
 
 During the alpha integration phase this workspace uses the ADR 0139-permitted
 local mounts of ABIR and LamQuant Lossless. A standalone release must replace

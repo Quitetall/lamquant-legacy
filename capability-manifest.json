@@ -2,8 +2,8 @@
   "schema": "lamquant.legacy-capabilities/v1",
   "process_protocol": "abir.adapter-process/v1",
   "capabilities": [
-    {"profile":"legacy.bcs1.v1","inspect":true,"forensic_import":true,"semantic_import":true,"reverse_export":false},
-    {"profile":"legacy.lml1.v1","inspect":true,"forensic_import":true,"semantic_import":true,"reverse_export":false},
+    {"profile":"legacy.bcs1.v1","inspect":true,"forensic_import":true,"semantic_import":true,"reverse_export":true},
+    {"profile":"legacy.lml1.v1","inspect":true,"forensic_import":true,"semantic_import":true,"reverse_export":true},
     {"profile":"legacy.lma.v1","inspect":true,"forensic_import":true,"semantic_import":false,"reverse_export":false},
     {"profile":"legacy.lma.v2","inspect":true,"forensic_import":true,"semantic_import":false,"reverse_export":false},
     {"profile":"legacy.lmqc.v1","inspect":true,"forensic_import":true,"semantic_import":false,"reverse_export":false},
