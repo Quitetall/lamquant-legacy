@@ -1,0 +1,26 @@
+[package]
+# Retired ADR 0069 in-process IR retained only for byte-compatible LML1/BCS1
+# decode and migration. New semantic ownership belongs to Quitetall/ABIR.
+name = "lamquant-legacy-ir"
+version = "0.1.1"
+edition = "2021"
+rust-version = "1.81"
+description = "Retired LamQuant LML1/BCS1 in-process recording IR retained for compatibility"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Quitetall/lamquant-legacy"
+publish = true
+
+[lib]
+name = "lamquant_legacy_ir"
+crate-type = ["rlib"]
+
+[features]
+# `std` ON by default (mirrors lamquant-lml-mcu) so `cargo test`/`--workspace` build
+# with a libtest harness; the no_std chain reaches this compatibility crate via
+# `default-features = false` and the riscv build uses `--no-default-features`.
+default = ["std"]
+# Host-side std: flips off `#![no_std]` and gates the `std::error::Error` impl on
+# `CodecError`. The atoms + Format/Mode/Codec are `alloc`-only (no_std-clean).
+std = []
+
+[dependencies]

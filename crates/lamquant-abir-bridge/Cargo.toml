@@ -1,0 +1,14 @@
+[package]
+name = "lamquant-abir-bridge"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Quitetall/lamquant-legacy"
+publish = true
+
+[dependencies]
+legacy-ir = { package = "lamquant-legacy-ir", version = "=0.1.1", path = "../lamquant-legacy-ir", default-features = false }
+"semantic-abir" = { package = "abir", version = "=0.1.0", path = "../../../abir/crates/abir", default-features = false, features = ["alloc"] }
+blake3 = { workspace = true, default-features = false }
+bytemuck.workspace = true

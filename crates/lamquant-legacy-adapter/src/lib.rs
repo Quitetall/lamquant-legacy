@@ -1,6 +1,17 @@
 #![forbid(unsafe_code)]
 
+use abir::{
+    canonical_debug_json, logical_content_id, payload_content_id, Atom, AtomTag, ByteOrder, Clock,
+    ClockTag, ConceptId, DatasetDraft, DatasetTag, ElementType, Fidelity, FidelityKind, Layout,
+    ObjectId, PayloadDescriptor, Presence, Rational, Recording, RecordingTag, SemanticAxis,
+    SemanticRef, SignalBlock, SourceCapsule, SourceKey, Stream, StreamTag, Tensor, TimeAxis,
+    TimeSegment, ValidationLimits,
+};
+use abir_adapter::{MappingDisposition, MappingEntry, MappingReport, ProfileId, SemanticCoverage};
+use lamquant_legacy_ir::{Bcs1Header, BCS1_VERSION_MAJOR, CODEC_LML_53};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::borrow::Cow;
 use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
@@ -8,6 +19,11 @@ use std::path::{Path, PathBuf};
 
 const RECEIPT_FILE: &str = "receipt.json";
 const SOURCE_FILE: &str = "source.bin";
+const DATASET_FILE: &str = "dataset.json";
+const PAYLOAD_FILE: &str = "payload.i64le";
+const MAPPING_REPORT_FILE: &str = "mapping-report.json";
+const FIDELITY_REPORT_FILE: &str = "fidelity-report.json";
+const SEMANTIC_RECEIPT_FILE: &str = "semantic-receipt.json";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -37,6 +53,31 @@ impl LegacyFormat {
             Self::Lqtp3 => "legacy.lqtp.v3",
         }
     }
+
+    pub const fn supports_semantic_import(self) -> bool {
+        matches!(self, Self::Bcs1 | Self::Lml1)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ContainerFacts {
+    format: LegacyFormat,
+    channels: u64,
+    samples_per_channel: u64,
+    decoded_payload_bytes: u64,
+    sample_rate_millihz: Option<u32>,
+    modality_tag: Option<u8>,
+    metadata: String,
+}
+
+#[derive(Clone, Debug)]
+struct SemanticArtifacts {
+    receipt: SemanticImportReceipt,
+    dataset_json: Vec<u8>,
+    payload: Vec<u8>,
+    mapping_report: Vec<u8>,
+    fidelity_report: Vec<u8>,
+    semantic_receipt: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -58,12 +99,57 @@ pub struct ConvertReceipt {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SemanticImportRequest {
+    pub source: PathBuf,
+    pub destination: PathBuf,
+    pub accept_fidelity: bool,
+    pub max_source_bytes: u64,
+    pub max_decoded_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SemanticImportReceipt {
+    pub profile: String,
+    pub source_blake3: String,
+    pub source_bytes: u64,
+    pub decoded_channels: u64,
+    pub decoded_samples_per_channel: u64,
+    pub decoded_payload_bytes: u64,
+    pub dataset_content_id: String,
+    pub payload_content_id: String,
+    pub source_preserved: bool,
+    pub exact_sample_values: bool,
+    pub exact_source_restoration: bool,
+    pub semantic_equivalence: bool,
+    pub timing: String,
+    pub modality: String,
+    pub semantic_coverage: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SemanticFidelityReport {
+    pub schema: String,
+    pub source_profile: String,
+    pub exact_source_restoration: bool,
+    pub exact_sample_values: bool,
+    pub sample_values_changed: bool,
+    pub timing_equivalence: bool,
+    pub modality_equivalence: bool,
+    pub semantic_equivalence: bool,
+    pub source_capsule_file: String,
+    pub caveats: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Inspection {
     pub profile: String,
     pub source_bytes: u64,
     pub source_blake3: String,
     pub semantic_conversion: bool,
     pub forensic_conversion: bool,
+    pub decoded_channels: Option<u64>,
+    pub decoded_samples_per_channel: Option<u64>,
+    pub decoded_payload_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -91,6 +177,7 @@ pub enum ProcessRequest {
         max_source_bytes: u64,
     },
     ConvertForensic(ConvertRequest),
+    ImportSemantic(SemanticImportRequest),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -99,6 +186,7 @@ pub enum ProcessResponse {
     OkManifest(CapabilityManifest),
     OkInspection(Inspection),
     OkConversion(ConvertReceipt),
+    OkSemanticImport(SemanticImportReceipt),
     Error { code: String, message: String },
 }
 
@@ -107,6 +195,10 @@ pub enum LegacyError {
     UnknownMagic,
     SourceTooLarge,
     AcceptanceRequired,
+    SemanticImportUnsupported,
+    DecodedTooLarge,
+    MalformedContainer(String),
+    SemanticValidation(String),
     UnsafeSource,
     DestinationConflict,
     Io(String),
@@ -119,6 +211,10 @@ impl LegacyError {
             Self::UnknownMagic => "unknown-magic",
             Self::SourceTooLarge => "source-too-large",
             Self::AcceptanceRequired => "acceptance-required",
+            Self::SemanticImportUnsupported => "semantic-import-unsupported",
+            Self::DecodedTooLarge => "decoded-output-too-large",
+            Self::MalformedContainer(_) => "malformed-container",
+            Self::SemanticValidation(_) => "semantic-validation",
             Self::UnsafeSource => "unsafe-source",
             Self::DestinationConflict => "destination-conflict",
             Self::Io(_) => "io",
@@ -133,7 +229,17 @@ impl fmt::Display for LegacyError {
             Self::UnknownMagic => formatter.write_str("unsupported retired wire magic"),
             Self::SourceTooLarge => formatter.write_str("source exceeds declared byte limit"),
             Self::AcceptanceRequired => {
-                formatter.write_str("forensic fidelity receipt must be accepted before writing")
+                formatter.write_str("fidelity receipt must be accepted before writing")
+            }
+            Self::SemanticImportUnsupported => formatter.write_str(
+                "retired profile has no current semantic importer; forensic import remains available",
+            ),
+            Self::DecodedTooLarge => {
+                formatter.write_str("decoded signal exceeds declared byte limit")
+            }
+            Self::MalformedContainer(message) => write!(formatter, "malformed container: {message}"),
+            Self::SemanticValidation(message) => {
+                write!(formatter, "semantic ABIR validation failed: {message}")
             }
             Self::UnsafeSource => formatter.write_str("source must be a regular non-symlink file"),
             Self::DestinationConflict => {
@@ -198,7 +304,7 @@ pub fn capability_manifest() -> CapabilityManifest {
                 profile: format.profile().to_owned(),
                 inspect: true,
                 forensic_import: true,
-                semantic_import: false,
+                semantic_import: format.supports_semantic_import(),
                 reverse_export: false,
             })
             .collect(),
@@ -208,12 +314,20 @@ pub fn capability_manifest() -> CapabilityManifest {
 pub fn inspect(source: &Path, max_source_bytes: u64) -> Result<Inspection, LegacyError> {
     let bytes = read_bounded(source, max_source_bytes)?;
     let format = detect_format(&bytes)?;
+    let facts = if format.supports_semantic_import() {
+        Some(inspect_container(&bytes, format, u64::MAX)?)
+    } else {
+        None
+    };
     Ok(Inspection {
         profile: format.profile().to_owned(),
         source_bytes: bytes.len() as u64,
         source_blake3: blake3::hash(&bytes).to_hex().to_string(),
-        semantic_conversion: false,
+        semantic_conversion: format.supports_semantic_import(),
         forensic_conversion: true,
+        decoded_channels: facts.as_ref().map(|value| value.channels),
+        decoded_samples_per_channel: facts.as_ref().map(|value| value.samples_per_channel),
+        decoded_payload_bytes: facts.as_ref().map(|value| value.decoded_payload_bytes),
     })
 }
 
@@ -257,6 +371,502 @@ pub fn convert_forensic(request: &ConvertRequest) -> Result<ConvertReceipt, Lega
     result
 }
 
+pub fn import_semantic(
+    request: &SemanticImportRequest,
+) -> Result<SemanticImportReceipt, LegacyError> {
+    if !request.accept_fidelity {
+        return Err(LegacyError::AcceptanceRequired);
+    }
+    let source = read_bounded(&request.source, request.max_source_bytes)?;
+    let format = detect_format(&source)?;
+    if !format.supports_semantic_import() {
+        return Err(LegacyError::SemanticImportUnsupported);
+    }
+    let facts = inspect_container(&source, format, request.max_decoded_bytes)?;
+    let decode_source = decode_source(&source, format)?;
+    let signal = lamquant_lml_legacy::container::read_bytes(&decode_source)
+        .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?
+        .0;
+    verify_decoded_shape(&signal, &facts)?;
+    let artifacts = build_semantic_artifacts(&source, &facts, signal, request.max_decoded_bytes)?;
+
+    if request.destination.exists() {
+        return verify_existing_semantic(&request.destination, &source, &artifacts);
+    }
+    let parent = request
+        .destination
+        .parent()
+        .ok_or_else(|| LegacyError::Io("destination has no parent".to_owned()))?;
+    fs::create_dir_all(parent).map_err(io_error)?;
+    let temporary = tempfile::Builder::new()
+        .prefix(".lamquant-legacy-semantic-")
+        .tempdir_in(parent)
+        .map_err(io_error)?;
+    let result = (|| {
+        let root = temporary.path();
+        write_new(&root.join(SOURCE_FILE), &source)?;
+        write_new(&root.join(DATASET_FILE), &artifacts.dataset_json)?;
+        write_new(&root.join(PAYLOAD_FILE), &artifacts.payload)?;
+        write_new(&root.join(MAPPING_REPORT_FILE), &artifacts.mapping_report)?;
+        write_new(&root.join(FIDELITY_REPORT_FILE), &artifacts.fidelity_report)?;
+        write_new(
+            &root.join(SEMANTIC_RECEIPT_FILE),
+            &artifacts.semantic_receipt,
+        )?;
+        fs::rename(root, &request.destination).map_err(io_error)?;
+        Ok(artifacts.receipt.clone())
+    })();
+    if result.is_ok() {
+        std::mem::forget(temporary);
+    }
+    result
+}
+
+fn inspect_container(
+    bytes: &[u8],
+    format: LegacyFormat,
+    max_decoded_bytes: u64,
+) -> Result<ContainerFacts, LegacyError> {
+    if !format.supports_semantic_import() {
+        return Err(LegacyError::SemanticImportUnsupported);
+    }
+    let bcs1_header = if format == LegacyFormat::Bcs1 {
+        let header = Bcs1Header::parse(bytes)
+            .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+        if header.version_major > BCS1_VERSION_MAJOR {
+            return Err(LegacyError::MalformedContainer(format!(
+                "unsupported BCS1 major version {}",
+                header.version_major
+            )));
+        }
+        if header.decode_capability != 0 {
+            return Err(LegacyError::MalformedContainer(format!(
+                "BCS1 decode capability {} is unsupported",
+                header.decode_capability
+            )));
+        }
+        if header.codec_descriptor != CODEC_LML_53 {
+            return Err(LegacyError::MalformedContainer(format!(
+                "BCS1 codec descriptor {} is not the lossless LML 5/3 profile",
+                header.codec_descriptor
+            )));
+        }
+        Some(header)
+    } else {
+        None
+    };
+    let decode_source = match bcs1_header.as_ref() {
+        Some(header) => Cow::Owned(bcs1_as_lml1(bytes, header)?),
+        None => Cow::Borrowed(bytes),
+    };
+    let header = lamquant_lml_legacy::container::parse_header(&decode_source)
+        .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+    let channels = u64::try_from(header.n_ch).map_err(|_| LegacyError::DecodedTooLarge)?;
+    let samples_per_channel =
+        u64::try_from(header.total_samples).map_err(|_| LegacyError::DecodedTooLarge)?;
+    let decoded_payload_bytes = channels
+        .checked_mul(samples_per_channel)
+        .and_then(|value| value.checked_mul(8))
+        .ok_or(LegacyError::DecodedTooLarge)?;
+    if decoded_payload_bytes > max_decoded_bytes {
+        return Err(LegacyError::DecodedTooLarge);
+    }
+    let sample_rate_millihz = bcs1_header
+        .as_ref()
+        .map(|value| value.sample_rate_mhz)
+        .filter(|value| *value > 0)
+        .or_else(|| sample_rate_millihz(bytes, format, &header.metadata));
+    let modality_tag = bcs1_header.map(|value| value.modality_tag);
+    Ok(ContainerFacts {
+        format,
+        channels,
+        samples_per_channel,
+        decoded_payload_bytes,
+        sample_rate_millihz,
+        modality_tag,
+        metadata: header.metadata,
+    })
+}
+
+fn decode_source<'a>(source: &'a [u8], format: LegacyFormat) -> Result<Cow<'a, [u8]>, LegacyError> {
+    if format != LegacyFormat::Bcs1 {
+        return Ok(Cow::Borrowed(source));
+    }
+    let header = Bcs1Header::parse(source)
+        .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+    Ok(Cow::Owned(bcs1_as_lml1(source, &header)?))
+}
+
+fn bcs1_as_lml1(source: &[u8], header: &Bcs1Header) -> Result<Vec<u8>, LegacyError> {
+    if source.len() < 40 {
+        return Err(LegacyError::MalformedContainer(
+            "BCS1 source is shorter than its fixed header".to_owned(),
+        ));
+    }
+    let capacity = source
+        .len()
+        .checked_sub(8)
+        .ok_or_else(|| LegacyError::MalformedContainer("BCS1 size underflow".to_owned()))?;
+    let mut translated = Vec::with_capacity(capacity);
+    translated.extend_from_slice(b"LML1");
+    translated.extend_from_slice(&1_u16.to_le_bytes());
+    translated.extend_from_slice(&header.n_channels.to_le_bytes());
+    translated.extend_from_slice(&header.n_windows.to_le_bytes());
+    translated.extend_from_slice(&header.total_samples.to_le_bytes());
+    translated.extend_from_slice(&header.window_size.to_le_bytes());
+    translated.extend_from_slice(&header.sample_rate_mhz.to_le_bytes());
+    translated.push(header.bit_depth);
+    translated.push(header.flags);
+    translated.extend_from_slice(&header.metadata_length.to_le_bytes());
+    translated.extend_from_slice(&[0_u8; 6]);
+    translated.extend_from_slice(&source[40..]);
+    Ok(translated)
+}
+
+fn sample_rate_millihz(bytes: &[u8], format: LegacyFormat, metadata: &str) -> Option<u32> {
+    let header_value = match format {
+        LegacyFormat::Bcs1 if bytes.len() >= 26 => Some(u32::from_le_bytes([
+            bytes[22], bytes[23], bytes[24], bytes[25],
+        ])),
+        LegacyFormat::Lml1
+            if bytes.len() >= 32
+                && u16::from_le_bytes([bytes[4], bytes[5]]) == 1
+                && matches!(bytes[20], 16 | 24 | 32) =>
+        {
+            Some(u32::from_le_bytes([
+                bytes[16], bytes[17], bytes[18], bytes[19],
+            ]))
+        }
+        _ => None,
+    }
+    .filter(|value| *value > 0);
+    header_value.or_else(|| {
+        let value = serde_json::from_str::<Value>(metadata)
+            .ok()?
+            .get("sample_rate")?
+            .as_f64()?;
+        if !value.is_finite() || value <= 0.0 || value > f64::from(u32::MAX) / 1000.0 {
+            return None;
+        }
+        let millihz = value * 1000.0;
+        let rounded = millihz.round();
+        ((millihz - rounded).abs() <= 1e-9).then_some(rounded as u32)
+    })
+}
+
+fn verify_decoded_shape(signal: &[Vec<i64>], facts: &ContainerFacts) -> Result<(), LegacyError> {
+    if u64::try_from(signal.len()).ok() != Some(facts.channels)
+        || signal
+            .iter()
+            .any(|channel| u64::try_from(channel.len()).ok() != Some(facts.samples_per_channel))
+    {
+        return Err(LegacyError::MalformedContainer(
+            "decoder output shape does not match the validated container header".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn build_semantic_artifacts(
+    source: &[u8],
+    facts: &ContainerFacts,
+    signal: Vec<Vec<i64>>,
+    max_decoded_bytes: u64,
+) -> Result<SemanticArtifacts, LegacyError> {
+    let source_hash = blake3::hash(source);
+    let source_blake3 = source_hash.to_hex().to_string();
+    let mut payload = Vec::with_capacity(
+        usize::try_from(facts.decoded_payload_bytes).map_err(|_| LegacyError::DecodedTooLarge)?,
+    );
+    for channel in signal {
+        for sample in channel {
+            payload.extend_from_slice(&sample.to_le_bytes());
+        }
+    }
+    if u64::try_from(payload.len()).ok() != Some(facts.decoded_payload_bytes) {
+        return Err(LegacyError::DecodedTooLarge);
+    }
+    let payload_id = payload_content_id(ElementType::I64, &payload);
+    let source_content_id = payload_content_id(ElementType::Bytes, source);
+    let dataset_id = derive_id::<DatasetTag>(source_hash.as_bytes(), b"dataset");
+    let recording_id = derive_id::<RecordingTag>(source_hash.as_bytes(), b"recording");
+    let stream_id = derive_id::<StreamTag>(source_hash.as_bytes(), b"stream");
+    let atom_id = derive_id::<AtomTag>(source_hash.as_bytes(), b"signal");
+    let clock_id = derive_id::<ClockTag>(source_hash.as_bytes(), b"clock");
+    let modality = modality_concept(facts.modality_tag);
+
+    let descriptor = PayloadDescriptor::new(
+        payload_id,
+        facts.decoded_payload_bytes,
+        ElementType::I64,
+        ByteOrder::Little,
+        vec![facts.channels, facts.samples_per_channel],
+        Layout::DenseRowMajor,
+        Some(concept("abir:encoding/raw")?),
+        Some("application/vnd.abir.i64le".to_owned()),
+    );
+    let (atom, stream_clock) = if let Some(millihz) = facts.sample_rate_millihz {
+        let rate = Rational::new(i128::from(millihz), 1000)
+            .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?;
+        let segment = TimeSegment::new(
+            Rational::new(0, 1).expect("zero rational is valid"),
+            rate,
+            facts.samples_per_channel,
+        )
+        .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?;
+        (
+            Atom::SignalBlock(SignalBlock::new(
+                atom_id,
+                Presence::Present,
+                Some(descriptor),
+                TimeAxis::Regular(segment),
+                None,
+            )),
+            Some((clock_id, rate)),
+        )
+    } else {
+        (
+            Atom::Tensor(Tensor::new(
+                atom_id,
+                Presence::Present,
+                Some(descriptor),
+                vec![
+                    SemanticAxis::new(concept("abir:axis/channel")?, facts.channels),
+                    SemanticAxis::new(concept("abir:axis/sample")?, facts.samples_per_channel),
+                ],
+            )),
+            None,
+        )
+    };
+
+    let mut recording = Recording::new(recording_id, vec![stream_id]);
+    recording.add_source_key(
+        SourceKey::new("legacy-source-blake3", &source_blake3)
+            .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?,
+    );
+    let mut draft = DatasetDraft::new(dataset_id);
+    draft.add_recording(recording);
+    draft.add_stream(Stream::new(
+        stream_id,
+        recording_id,
+        modality.clone(),
+        vec![atom_id],
+        stream_clock.map(|(id, _)| id),
+        None,
+        None,
+    ));
+    draft.add_atom(atom);
+    if let Some((id, rate)) = stream_clock {
+        draft.add_clock(Clock::new(
+            id,
+            concept("abir:clock/device")?,
+            None,
+            Rational::new(0, 1).expect("zero rational is valid"),
+            rate,
+            Rational::new(0, 1).expect("zero uncertainty is valid"),
+        ));
+    }
+    draft.add_fidelity(Fidelity::new(
+        SemanticRef::of(atom_id),
+        FidelityKind::Exact,
+        None,
+        None,
+    ));
+    draft.add_source_capsule(SourceCapsule::new(
+        SourceKey::new("legacy-source-blake3", &source_blake3)
+            .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?,
+        source_content_id,
+        Some(legacy_media_type(facts.format)),
+    ));
+    let limits = ValidationLimits {
+        max_logical_payload_bytes: max_decoded_bytes,
+        ..ValidationLimits::default()
+    };
+    let dataset = draft
+        .validate(limits)
+        .map_err(|report| LegacyError::SemanticValidation(format!("{report:?}")))?;
+    let dataset_json = canonical_debug_json(&dataset)
+        .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?;
+    let dataset_content_id = logical_content_id(&dataset)
+        .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?;
+
+    let timing_equivalence = facts.sample_rate_millihz.is_some();
+    let modality_equivalence = facts.modality_tag.is_some();
+    let mapping = mapping_report(facts, timing_equivalence, modality_equivalence);
+    let mapping_report = serde_json::to_vec_pretty(&mapping)
+        .map_err(|error| LegacyError::InvalidProtocol(error.to_string()))?;
+    let fidelity = SemanticFidelityReport {
+        schema: "lamquant.legacy-fidelity/v1".to_owned(),
+        source_profile: facts.format.profile().to_owned(),
+        exact_source_restoration: true,
+        exact_sample_values: true,
+        sample_values_changed: false,
+        timing_equivalence,
+        modality_equivalence,
+        semantic_equivalence: false,
+        source_capsule_file: SOURCE_FILE.to_owned(),
+        caveats: vec![
+            "legacy metadata remains quarantined in the exact source capsule".to_owned(),
+            "semantic coverage is projected until every legacy metadata field has a pinned mapping"
+                .to_owned(),
+        ],
+    };
+    let fidelity_report = serde_json::to_vec_pretty(&fidelity)
+        .map_err(|error| LegacyError::InvalidProtocol(error.to_string()))?;
+    let receipt = SemanticImportReceipt {
+        profile: facts.format.profile().to_owned(),
+        source_blake3,
+        source_bytes: source.len() as u64,
+        decoded_channels: facts.channels,
+        decoded_samples_per_channel: facts.samples_per_channel,
+        decoded_payload_bytes: facts.decoded_payload_bytes,
+        dataset_content_id: dataset_content_id.to_string(),
+        payload_content_id: payload_id.to_string(),
+        source_preserved: true,
+        exact_sample_values: true,
+        exact_source_restoration: true,
+        semantic_equivalence: false,
+        timing: if timing_equivalence {
+            "exact"
+        } else {
+            "unknown-at-source"
+        }
+        .to_owned(),
+        modality: modality.to_string(),
+        semantic_coverage: "projected-semantic".to_owned(),
+    };
+    let semantic_receipt = serde_json::to_vec_pretty(&receipt)
+        .map_err(|error| LegacyError::InvalidProtocol(error.to_string()))?;
+    Ok(SemanticArtifacts {
+        receipt,
+        dataset_json,
+        payload,
+        mapping_report,
+        fidelity_report,
+        semantic_receipt,
+    })
+}
+
+fn mapping_report(
+    facts: &ContainerFacts,
+    timing_equivalence: bool,
+    modality_equivalence: bool,
+) -> MappingReport {
+    let mut entries = vec![MappingEntry {
+        source_path: "wire.decoded-samples".to_owned(),
+        target: "abir.stream.atom.payload".to_owned(),
+        disposition: MappingDisposition::Exact,
+        reason: None,
+    }];
+    entries.push(MappingEntry {
+        source_path: "wire.sample-rate".to_owned(),
+        target: "abir.stream.atom.time-axis".to_owned(),
+        disposition: if timing_equivalence {
+            MappingDisposition::Exact
+        } else {
+            MappingDisposition::Unsupported
+        },
+        reason: (!timing_equivalence)
+            .then(|| "legacy source carries no exact positive sample rate".to_owned()),
+    });
+    entries.push(MappingEntry {
+        source_path: "wire.modality".to_owned(),
+        target: "abir.stream.modality".to_owned(),
+        disposition: if modality_equivalence {
+            MappingDisposition::Exact
+        } else {
+            MappingDisposition::Unsupported
+        },
+        reason: (!modality_equivalence).then(|| "LML1 carries no modality field".to_owned()),
+    });
+    if !facts.metadata.trim().is_empty() {
+        entries.push(MappingEntry {
+            source_path: "wire.metadata-json".to_owned(),
+            target: "abir.source-capsule".to_owned(),
+            disposition: MappingDisposition::Quarantined,
+            reason: Some(
+                "unversioned legacy metadata is preserved byte-exact but not trusted as ABIR semantics"
+                    .to_owned(),
+            ),
+        });
+    }
+    MappingReport {
+        source_profile: ProfileId(facts.format.profile().to_owned()),
+        target_profile: ProfileId("abir.semantic-v1".to_owned()),
+        semantic_coverage: SemanticCoverage::ProjectedSemantic,
+        entries,
+        preserved_unknowns: u64::from(!facts.metadata.trim().is_empty()),
+        sample_values_changed: false,
+        timing_changed: false,
+    }
+}
+
+fn modality_concept(tag: Option<u8>) -> ConceptId {
+    let value = match tag {
+        Some(0) => "abir:modality/eeg".to_owned(),
+        Some(1) => "legacy:modality/ieeg".to_owned(),
+        Some(2) => "legacy:modality/ecog".to_owned(),
+        Some(3) => "legacy:modality/seeg".to_owned(),
+        Some(4) => "abir:modality/ecg".to_owned(),
+        Some(5) => "abir:modality/emg".to_owned(),
+        Some(6) => "abir:modality/eog".to_owned(),
+        Some(7) => "legacy:modality/respiration".to_owned(),
+        Some(8) => "legacy:modality/acceleration".to_owned(),
+        Some(9) => "legacy:modality/other".to_owned(),
+        Some(255) => "legacy:modality/untyped".to_owned(),
+        Some(value) => format!("legacy:modality/tag-{value}"),
+        None => "legacy:modality/unknown-at-source".to_owned(),
+    };
+    ConceptId::new(value).expect("static legacy modality concepts are canonical")
+}
+
+fn concept(value: &str) -> Result<ConceptId, LegacyError> {
+    ConceptId::new(value).map_err(|error| LegacyError::SemanticValidation(error.to_string()))
+}
+
+fn derive_id<T>(source_hash: &[u8; 32], label: &[u8]) -> ObjectId<T> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"lamquant.legacy.semantic-import.v1\0");
+    hasher.update(label);
+    hasher.update(&[0]);
+    hasher.update(source_hash);
+    let hash = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    ObjectId::from_bytes(bytes)
+}
+
+fn legacy_media_type(format: LegacyFormat) -> &'static str {
+    match format {
+        LegacyFormat::Bcs1 => "application/vnd.lamquant.bcs1",
+        LegacyFormat::Lml1 => "application/vnd.lamquant.lml1",
+        _ => "application/octet-stream",
+    }
+}
+
+fn verify_existing_semantic(
+    destination: &Path,
+    expected_source: &[u8],
+    expected: &SemanticArtifacts,
+) -> Result<SemanticImportReceipt, LegacyError> {
+    let expected_files: &[(&str, &[u8])] = &[
+        (SOURCE_FILE, expected_source),
+        (DATASET_FILE, &expected.dataset_json),
+        (PAYLOAD_FILE, &expected.payload),
+        (MAPPING_REPORT_FILE, &expected.mapping_report),
+        (FIDELITY_REPORT_FILE, &expected.fidelity_report),
+        (SEMANTIC_RECEIPT_FILE, &expected.semantic_receipt),
+    ];
+    for (name, expected_bytes) in expected_files {
+        let actual =
+            fs::read(destination.join(name)).map_err(|_| LegacyError::DestinationConflict)?;
+        if actual != *expected_bytes {
+            return Err(LegacyError::DestinationConflict);
+        }
+    }
+    Ok(expected.receipt.clone())
+}
+
 pub fn handle(request: ProcessRequest) -> ProcessResponse {
     let result = match request {
         ProcessRequest::Manifest => return ProcessResponse::OkManifest(capability_manifest()),
@@ -266,6 +876,9 @@ pub fn handle(request: ProcessRequest) -> ProcessResponse {
         } => inspect(&source, max_source_bytes).map(ProcessResponse::OkInspection),
         ProcessRequest::ConvertForensic(request) => {
             convert_forensic(&request).map(ProcessResponse::OkConversion)
+        }
+        ProcessRequest::ImportSemantic(request) => {
+            import_semantic(&request).map(ProcessResponse::OkSemanticImport)
         }
     };
     result.unwrap_or_else(|error| ProcessResponse::Error {

@@ -8,7 +8,11 @@ repository.workspace = true
 description = "Process-isolated adapters for retired LamQuant wire formats"
 
 [dependencies]
+abir.workspace = true
+abir-adapter.workspace = true
 blake3.workspace = true
+lamquant-legacy-ir.workspace = true
+lamquant-lml-legacy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
@@ -17,6 +21,7 @@ tempfile.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+lamquant-lml-mcu.workspace = true
 
 [[bin]]
 name = "lamquant-legacy-adapter"

@@ -1,0 +1,39 @@
+[package]
+# LamQuant LML — the LEGACY v1 wire (ADR 0069 L3/L4). Sequesters the
+# structurally-suboptimal old container/wire scaffolding so the clean ABIR path
+# (lamquant-lossless) grows cruft-free. The kernels (lifting/lpc/golomb/rans) +
+# hardening stay in lamquant-lml-mcu and are CALLED from here; only the old
+# scaffolding lives in this crate. Host-only (the v1 container is std-bound;
+# firmware never decodes v1 *containers*, only per-window packets via the kernel).
+name = "lamquant-lml-legacy"
+version = "0.1.1"
+edition = "2021"
+rust-version = "1.81"
+description = "LamQuant LML — LEGACY v1 wire (ADR 0069): the sequestered old container/wire behind features — legacy-decode (the FROZEN v1 reader, old .lml/.lma decode forever) and legacy-encode (the retiring differential-oracle encoder). Kernels + hardening stay in lamquant-lml-mcu."
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Quitetall/lamquant-legacy"
+
+[lib]
+name = "lamquant_lml_legacy"
+crate-type = ["rlib"]
+
+[features]
+# The FROZEN v1 DECODER — default ON forever (old .lml/.lma must decode).
+default = ["legacy-decode"]
+legacy-decode = []
+# The retiring v1 ENCODER — the differential ORACLE; demoted out of default at cutover,
+# kept gated for Step-B forensics, deletable only after Step B ships its own goldens.
+legacy-encode = ["legacy-decode", "dep:lamquant-lml-desktop"]
+
+[dependencies]
+# Kernels + error/lml/lpc/deployment/crc32 — the proven core, CALLED not moved.
+lamquant-lml-mcu = { version = "0.9.3", path = "../../../codec-lossless/lamquant-lml-mcu", default-features = false, features = ["std"] }
+# The v1 container's parallel encode path (`backend` + `compress_with_mode_parallel`)
+# lives in the Desktop tier; the legacy writer dispatches through it.
+lamquant-lml-desktop = { version = "0.9.3", path = "../../../codec-lossless/lamquant-lml-desktop", features = ["fast"], optional = true }
+# The v1 metadata JSON (`metadata_with_codec_mode`).
+serde_json = { version = "1", features = ["std"] }
+
+[dev-dependencies]
+# The moved container/stream tests write to temp files.
+tempfile = "3"

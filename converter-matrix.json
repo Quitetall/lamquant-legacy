@@ -6,7 +6,31 @@
     "legacy.lqtp.v2", "legacy.lqtp.v3"
   ],
   "forensic_import": "PASS",
-  "semantic_import": "NOT_CLAIMED",
+  "semantic_import": "PARTIAL",
+  "semantic_profiles": {
+    "legacy.bcs1.v1": {
+      "status": "PASS_PROJECTED",
+      "sample_values": "EXACT",
+      "source_capsule": "EXACT",
+      "metadata": "QUARANTINED",
+      "reverse_export": "NOT_CLAIMED"
+    },
+    "legacy.lml1.v1": {
+      "status": "PASS_PROJECTED",
+      "sample_values": "EXACT",
+      "source_capsule": "EXACT",
+      "metadata": "QUARANTINED",
+      "modality": "UNKNOWN_AT_SOURCE",
+      "reverse_export": "NOT_CLAIMED"
+    },
+    "legacy.lma.v1": {"status": "NOT_CLAIMED"},
+    "legacy.lma.v2": {"status": "NOT_CLAIMED"},
+    "legacy.lmqc.v1": {"status": "NOT_CLAIMED"},
+    "legacy.lmlcrypt.v1": {"status": "NOT_CLAIMED"},
+    "legacy.lqtp.v1": {"status": "NOT_CLAIMED"},
+    "legacy.lqtp.v2": {"status": "NOT_CLAIMED"},
+    "legacy.lqtp.v3": {"status": "NOT_CLAIMED"}
+  },
   "reverse_export": "NOT_CLAIMED",
   "source_overwrite": false
 }
