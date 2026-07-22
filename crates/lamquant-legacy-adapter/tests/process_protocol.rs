@@ -142,6 +142,49 @@ fn committed_capability_manifest_matches_runtime() {
 }
 
 #[test]
+fn converter_matrix_is_complete_and_does_not_overclaim_runtime_capabilities() {
+    let matrix: serde_json::Value =
+        serde_json::from_slice(include_bytes!("../../../converter-matrix.json")).unwrap();
+    assert_eq!(matrix["schema"], "lamquant.legacy-converter-matrix/v1");
+    assert_eq!(matrix["source_overwrite"], false);
+
+    let manifest = capability_manifest();
+    let expected_profiles = manifest
+        .capabilities
+        .iter()
+        .map(|capability| capability.profile.as_str())
+        .collect::<Vec<_>>();
+    let declared_profiles = matrix["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|profile| profile.as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(declared_profiles, expected_profiles);
+
+    let semantic_profiles = matrix["semantic_profiles"].as_object().unwrap();
+    assert_eq!(semantic_profiles.len(), manifest.capabilities.len());
+    for capability in manifest.capabilities {
+        let claim = semantic_profiles
+            .get(&capability.profile)
+            .unwrap_or_else(|| panic!("matrix omitted {}", capability.profile));
+        let status = claim["status"].as_str().unwrap();
+        assert_eq!(
+            status != "NOT_CLAIMED",
+            capability.semantic_import,
+            "semantic-import claim drift for {}",
+            capability.profile,
+        );
+        assert_eq!(
+            claim.get("reverse_export").is_some(),
+            capability.reverse_export,
+            "reverse-export claim drift for {}",
+            capability.profile,
+        );
+    }
+}
+
+#[test]
 fn bcs1_semantic_import_decodes_validates_and_preserves_source() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("input.bcs1");
