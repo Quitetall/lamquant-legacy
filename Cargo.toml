@@ -15,8 +15,8 @@ license = "AGPL-3.0-or-later"
 repository = "https://github.com/Quitetall/lamquant-legacy"
 
 [workspace.dependencies]
-abir = { git = "https://github.com/Quitetall/ABIR.git", rev = "8bce65dd944cce8a47d4d13f6448fe0235cadca6", version = "=0.1.0" }
-abir-adapter = { git = "https://github.com/Quitetall/ABIR.git", rev = "8bce65dd944cce8a47d4d13f6448fe0235cadca6", version = "=0.1.0" }
+abir = { git = "https://github.com/Quitetall/ABIR.git", rev = "1f6dbf44cf46dec54e792775944744ab3efc510c", version = "=0.1.0" }
+abir-adapter = { git = "https://github.com/Quitetall/ABIR.git", rev = "1f6dbf44cf46dec54e792775944744ab3efc510c", version = "=0.1.0" }
 blake3 = { version = "=1.5.5", default-features = false }
 bytemuck = "=1.25.0"
 lamquant-legacy-ir = { path = "crates/lamquant-legacy-ir", version = "=0.1.1" }
