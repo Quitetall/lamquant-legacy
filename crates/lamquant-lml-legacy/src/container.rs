@@ -1087,12 +1087,12 @@ mod tests {
     fn synth_signal(n_ch: usize, t: usize, seed: u64) -> Vec<Vec<i64>> {
         let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
         let mut sig = vec![Vec::with_capacity(t); n_ch];
-        for ch in 0..n_ch {
+        for channel in sig.iter_mut().take(n_ch) {
             for _ in 0..t {
                 state = state
                     .wrapping_mul(6364136223846793005)
                     .wrapping_add(1442695040888963407);
-                sig[ch].push(((state >> 33) as i32) as i64 % 8000);
+                channel.push(((state >> 33) as i32) as i64 % 8000);
             }
         }
         sig
@@ -1612,8 +1612,8 @@ mod tests {
         ];
         let mut out = vec![0f32; 2 * 64];
         read_bytes_into_f32_calibrated(&buf, &mut out, &calib).unwrap();
-        for t in 0..64 {
-            assert_eq!(out[t], 0.0, "ch 0 t {t} should be zero (degenerate)");
+        for (t, value) in out.iter().take(64).enumerate() {
+            assert_eq!(*value, 0.0, "ch 0 t {t} should be zero (degenerate)");
         }
     }
 

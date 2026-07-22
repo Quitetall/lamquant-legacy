@@ -318,12 +318,12 @@ mod tests {
     fn synth_signal(n_ch: usize, t: usize, seed: u64) -> Vec<Vec<i64>> {
         let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
         let mut sig = vec![Vec::with_capacity(t); n_ch];
-        for ch in 0..n_ch {
+        for channel in sig.iter_mut().take(n_ch) {
             for _ in 0..t {
                 state = state
                     .wrapping_mul(6364136223846793005)
                     .wrapping_add(1442695040888963407);
-                sig[ch].push(((state >> 33) as i32) as i64 % 8000);
+                channel.push(((state >> 33) as i32) as i64 % 8000);
             }
         }
         sig
