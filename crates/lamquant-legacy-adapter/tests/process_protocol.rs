@@ -85,3 +85,25 @@ fn committed_capability_manifest_matches_runtime() {
     let runtime = serde_json::to_value(capability_manifest()).unwrap();
     assert_eq!(committed, runtime);
 }
+
+#[cfg(unix)]
+#[test]
+fn source_symlink_is_rejected_without_output() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let target = temp.path().join("target.lml");
+    let source = temp.path().join("source.lml");
+    let output = temp.path().join("out");
+    fs::write(&target, b"LML1payload").unwrap();
+    symlink(&target, &source).unwrap();
+    let error = convert_forensic(&ConvertRequest {
+        source,
+        destination: output.clone(),
+        accept_fidelity: true,
+        max_source_bytes: 1024,
+    })
+    .unwrap_err();
+    assert_eq!(error, LegacyError::UnsafeSource);
+    assert!(!output.exists());
+}

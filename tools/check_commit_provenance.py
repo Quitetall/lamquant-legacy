@@ -17,7 +17,7 @@ def git(*args: str) -> str:
 def check(commit: str) -> None:
     message = git("show", "-s", "--format=%B", commit)
     changed = {
-        line.split("\t", 1)[-1]
+        line.split("\t")[-1]
         for line in git("diff-tree", "--root", "--no-commit-id", "--name-status", "-r", commit)
         .splitlines()
         if line

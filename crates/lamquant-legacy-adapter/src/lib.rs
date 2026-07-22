@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 const RECEIPT_FILE: &str = "receipt.json";
@@ -239,25 +239,20 @@ pub fn convert_forensic(request: &ConvertRequest) -> Result<ConvertReceipt, Lega
         .parent()
         .ok_or_else(|| LegacyError::Io("destination has no parent".to_owned()))?;
     fs::create_dir_all(parent).map_err(io_error)?;
-    let temporary = parent.join(format!(
-        ".lamquant-legacy-{}-{}",
-        std::process::id(),
-        &receipt.source_blake3[..16]
-    ));
-    if temporary.exists() {
-        fs::remove_dir_all(&temporary).map_err(io_error)?;
-    }
-    fs::create_dir(&temporary).map_err(io_error)?;
+    let temporary = tempfile::Builder::new()
+        .prefix(".lamquant-legacy-")
+        .tempdir_in(parent)
+        .map_err(io_error)?;
     let result = (|| {
-        write_new(&temporary.join(SOURCE_FILE), &bytes)?;
+        write_new(&temporary.path().join(SOURCE_FILE), &bytes)?;
         let receipt_bytes = serde_json::to_vec_pretty(&receipt)
             .map_err(|error| LegacyError::InvalidProtocol(error.to_string()))?;
-        write_new(&temporary.join(RECEIPT_FILE), &receipt_bytes)?;
-        fs::rename(&temporary, &request.destination).map_err(io_error)?;
+        write_new(&temporary.path().join(RECEIPT_FILE), &receipt_bytes)?;
+        fs::rename(temporary.path(), &request.destination).map_err(io_error)?;
         Ok(receipt.clone())
     })();
-    if result.is_err() && temporary.exists() {
-        let _ = fs::remove_dir_all(&temporary);
+    if result.is_ok() {
+        std::mem::forget(temporary);
     }
     result
 }
@@ -280,15 +275,34 @@ pub fn handle(request: ProcessRequest) -> ProcessResponse {
 }
 
 fn read_bounded(path: &Path, max_source_bytes: u64) -> Result<Vec<u8>, LegacyError> {
-    let metadata = fs::symlink_metadata(path).map_err(io_error)?;
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let file = options.open(path).map_err(|error| {
+        if is_symlink_error(&error) {
+            LegacyError::UnsafeSource
+        } else {
+            io_error(error)
+        }
+    })?;
+    let metadata = file.metadata().map_err(io_error)?;
+    if !metadata.file_type().is_file() {
         return Err(LegacyError::UnsafeSource);
     }
     if metadata.len() > max_source_bytes {
         return Err(LegacyError::SourceTooLarge);
     }
-    let bytes = fs::read(path).map_err(io_error)?;
-    if bytes.len() as u64 > max_source_bytes {
+    let capacity = usize::try_from(metadata.len().min(max_source_bytes))
+        .map_err(|_| LegacyError::SourceTooLarge)?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(max_source_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(io_error)?;
+    if u64::try_from(bytes.len()).map_err(|_| LegacyError::SourceTooLarge)? > max_source_bytes {
         return Err(LegacyError::SourceTooLarge);
     }
     Ok(bytes)
@@ -325,4 +339,14 @@ fn verify_existing(
 
 fn io_error(error: std::io::Error) -> LegacyError {
     LegacyError::Io(error.to_string())
+}
+
+#[cfg(unix)]
+fn is_symlink_error(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(libc::ELOOP)
+}
+
+#[cfg(not(unix))]
+fn is_symlink_error(_error: &std::io::Error) -> bool {
+    false
 }

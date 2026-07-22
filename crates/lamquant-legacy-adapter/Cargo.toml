@@ -11,9 +11,12 @@ description = "Process-isolated adapters for retired LamQuant wire formats"
 blake3.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
 
 [[bin]]
 name = "lamquant-legacy-adapter"

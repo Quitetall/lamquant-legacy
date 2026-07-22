@@ -4,9 +4,14 @@ use std::io::{self, Read};
 fn run() -> Result<ProcessResponse, LegacyError> {
     let mut input = Vec::new();
     io::stdin()
-        .take(1024 * 1024)
+        .take(1024 * 1024 + 1)
         .read_to_end(&mut input)
         .map_err(|error| LegacyError::InvalidProtocol(error.to_string()))?;
+    if input.len() > 1024 * 1024 {
+        return Err(LegacyError::InvalidProtocol(
+            "request exceeds 1 MiB protocol limit".to_owned(),
+        ));
+    }
     let request = serde_json::from_slice::<ProcessRequest>(&input)
         .map_err(|error| LegacyError::InvalidProtocol(error.to_string()))?;
     Ok(handle(request))
