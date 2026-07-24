@@ -37,3 +37,10 @@ serde_json = { version = "1", features = ["std"] }
 [dev-dependencies]
 # The moved container/stream tests write to temp files.
 tempfile = "3"
+# ADR 0139 P3: the cross-backend byte-equality example digests encoded payloads.
+sha2 = "0.10"
+
+# ADR 0139 P3 compute evidence: needs the Desktop tier for both backends.
+[[example]]
+name = "backend_byte_equality"
+required-features = ["legacy-encode"]
