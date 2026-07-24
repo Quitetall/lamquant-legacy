@@ -71,6 +71,8 @@ impl LegacyFormat {
                 | Self::Lma2
                 | Self::Lmqc
                 | Self::Lmlcrypt
+                | Self::Lqtp2
+                | Self::Lqtp3
         )
     }
 
@@ -84,6 +86,8 @@ impl LegacyFormat {
                 | Self::Lma2
                 | Self::Lmqc
                 | Self::Lmlcrypt
+                | Self::Lqtp2
+                | Self::Lqtp3
         )
     }
 }
@@ -665,7 +669,11 @@ pub fn export_semantic(
     // Capsule-exact re-emission is byte-identical and invents nothing.
     if matches!(
         request.format,
-        LegacyFormat::Lqtp1 | LegacyFormat::Lmqc | LegacyFormat::Lmlcrypt
+        LegacyFormat::Lqtp1
+            | LegacyFormat::Lmqc
+            | LegacyFormat::Lmlcrypt
+            | LegacyFormat::Lqtp2
+            | LegacyFormat::Lqtp3
     ) {
         return export_capsule_exact(request, &dataset);
     }
@@ -1365,6 +1373,16 @@ fn build_artifacts(
     match format {
         LegacyFormat::Lqtp1 => build_lqtp1_artifacts(source, anchor, max_decoded_bytes),
         LegacyFormat::Lmqc => build_lmqc_artifacts(source, anchor, max_decoded_bytes),
+        LegacyFormat::Lqtp2 => build_tensor_pack_artifacts(
+            &read_lqtp2_snapshot(source, max_decoded_bytes)?,
+            anchor,
+            max_decoded_bytes,
+        ),
+        LegacyFormat::Lqtp3 => build_tensor_pack_artifacts(
+            &read_lqtp3_snapshot(source, max_decoded_bytes)?,
+            anchor,
+            max_decoded_bytes,
+        ),
         // An archive is a directory tree, not one LML stream, so it cannot go
         // through the single-container decode path. The archive reader resolves
         // either generation's layout, so v1 and v2 share this path.
@@ -1475,6 +1493,453 @@ fn open_lmlcrypt(source: &[u8]) -> Result<(Vec<u8>, SourceAnchor<'_>), LegacyErr
         ],
     };
     Ok((plaintext, anchor))
+}
+
+/// One view of a retired training snapshot, normalised across LQTP2 and LQTP3.
+struct SnapshotView {
+    name: String,
+    dtype: u8,
+    encoding: u8,
+    row_shape: Vec<u64>,
+    spec_sha256: String,
+    /// Decoded rows for an f32 view; the stored bytes otherwise. A non-f32
+    /// view is carried encoded rather than reinterpreted into a type the wire
+    /// never claimed.
+    payload: Vec<u8>,
+    element: ElementType,
+    decoded: bool,
+}
+
+/// A retired training snapshot: many fixed-shape views over a shared row count.
+struct Snapshot {
+    row_count: u64,
+    manifest_sha256: String,
+    view_spec_sha256: String,
+    metadata_bytes: u64,
+    views: Vec<SnapshotView>,
+}
+
+fn hex32(bytes: &[u8; 32]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Stage an in-memory source for the mmap-based snapshot readers.
+fn stage_snapshot(source: &[u8]) -> Result<tempfile::NamedTempFile, LegacyError> {
+    let mut temporary = tempfile::NamedTempFile::new().map_err(io_error)?;
+    temporary.write_all(source).map_err(io_error)?;
+    temporary.flush().map_err(io_error)?;
+    Ok(temporary)
+}
+
+/// Budget check performed BEFORE decoding a view, so an adversarial header
+/// cannot make the adapter allocate its way past the caller's limit.
+fn charge(total: &mut u64, add: u64, limit: u64) -> Result<(), LegacyError> {
+    *total = total.checked_add(add).ok_or(LegacyError::DecodedTooLarge)?;
+    if *total > limit {
+        return Err(LegacyError::DecodedTooLarge);
+    }
+    Ok(())
+}
+
+fn read_lqtp2_snapshot(source: &[u8], max_decoded_bytes: u64) -> Result<Snapshot, LegacyError> {
+    use lamquant_lml_legacy::tensor_pack_v2::{PackV2Dtype, PackV2Reader};
+
+    let staged = stage_snapshot(source)?;
+    // `open` verifies header, directory, metadata and every view hash, so a
+    // corrupted snapshot is refused here rather than half-imported.
+    let reader = PackV2Reader::open(staged.path(), None, None)
+        .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+    let row_count = reader.row_count();
+    let mut budget = 0_u64;
+    let mut views = Vec::with_capacity(reader.views().len());
+    for view in reader.views() {
+        let rows = usize::try_from(row_count).map_err(|_| LegacyError::DecodedTooLarge)?;
+        let decoded = view.dtype() == PackV2Dtype::F32;
+        let mut payload = Vec::new();
+        for row in 0..rows {
+            if decoded {
+                let values = reader
+                    .dequantize_f32(view.name(), row)
+                    .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+                charge(&mut budget, (values.len() * 4) as u64, max_decoded_bytes)?;
+                for value in values {
+                    if !value.is_finite() {
+                        return Err(LegacyError::MalformedContainer(
+                            "LQTP2 view decoded to a non-finite value".to_owned(),
+                        ));
+                    }
+                    payload.extend_from_slice(&value.to_le_bytes());
+                }
+            } else {
+                let bytes = reader
+                    .row_raw(view.name(), row)
+                    .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+                charge(&mut budget, bytes.len() as u64, max_decoded_bytes)?;
+                payload.extend_from_slice(bytes);
+            }
+        }
+        views.push(SnapshotView {
+            name: view.name().to_owned(),
+            dtype: view.dtype().to_u8(),
+            encoding: view.encoding().to_u8(),
+            row_shape: view.row_shape().to_vec(),
+            spec_sha256: hex32(view.spec_sha256()),
+            payload,
+            element: if decoded {
+                ElementType::F32
+            } else {
+                ElementType::Bytes
+            },
+            decoded,
+        });
+    }
+    Ok(Snapshot {
+        row_count,
+        manifest_sha256: hex32(reader.manifest_sha256()),
+        view_spec_sha256: hex32(reader.view_spec_sha256()),
+        metadata_bytes: reader.metadata().len() as u64,
+        views,
+    })
+}
+
+fn read_lqtp3_snapshot(source: &[u8], max_decoded_bytes: u64) -> Result<Snapshot, LegacyError> {
+    use lamquant_lml_legacy::tensor_pack_v3::{PackV3Dtype, PackV3Reader};
+
+    let staged = stage_snapshot(source)?;
+    let reader = PackV3Reader::open(staged.path(), None, None)
+        .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+    let row_count = reader.row_count();
+    let mut budget = 0_u64;
+    let mut views = Vec::with_capacity(reader.views().len());
+    for view in reader.views() {
+        let rows = usize::try_from(row_count).map_err(|_| LegacyError::DecodedTooLarge)?;
+        let decoded = view.dtype() == PackV3Dtype::F32;
+        let mut payload = Vec::new();
+        for row in 0..rows {
+            if decoded {
+                let values = reader
+                    .dequantize_f32(view.name(), row)
+                    .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+                charge(&mut budget, (values.len() * 4) as u64, max_decoded_bytes)?;
+                for value in values {
+                    if !value.is_finite() {
+                        return Err(LegacyError::MalformedContainer(
+                            "LQTP3 view decoded to a non-finite value".to_owned(),
+                        ));
+                    }
+                    payload.extend_from_slice(&value.to_le_bytes());
+                }
+            } else {
+                let bytes = reader
+                    .read_raw_row(view.name(), row)
+                    .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+                charge(&mut budget, bytes.len() as u64, max_decoded_bytes)?;
+                payload.extend_from_slice(&bytes);
+            }
+        }
+        views.push(SnapshotView {
+            name: view.name().to_owned(),
+            dtype: view.dtype().to_u8(),
+            encoding: view.encoding().to_u8(),
+            row_shape: view.row_shape().to_vec(),
+            spec_sha256: hex32(view.spec_sha256()),
+            payload,
+            element: if decoded {
+                ElementType::F32
+            } else {
+                ElementType::Bytes
+            },
+            decoded,
+        });
+    }
+    Ok(Snapshot {
+        row_count,
+        manifest_sha256: hex32(reader.manifest_sha256()),
+        view_spec_sha256: hex32(reader.view_spec_sha256()),
+        metadata_bytes: reader.metadata().len() as u64,
+        views,
+    })
+}
+
+/// Import a retired multi-view training snapshot (LQTP2 or LQTP3).
+///
+/// Every view becomes its OWN stream and tensor atom. Flattening the views into
+/// one synthetic tensor would assert a joint structure the wire never declared,
+/// and the whole point of these generations over LQTP1 is that a snapshot holds
+/// several independently shaped views over a shared row axis.
+fn build_tensor_pack_artifacts(
+    snapshot: &Snapshot,
+    anchor: &SourceAnchor<'_>,
+    max_decoded_bytes: u64,
+) -> Result<SemanticArtifacts, LegacyError> {
+    if snapshot.views.is_empty() || snapshot.row_count == 0 {
+        return Err(LegacyError::MalformedContainer(
+            "training snapshot declares no rows or no views".to_owned(),
+        ));
+    }
+    let source_hash = blake3::hash(anchor.bytes);
+    let source_blake3 = source_hash.to_hex().to_string();
+    let source_content_id = payload_content_id(ElementType::Bytes, anchor.bytes);
+    let dataset_id = derive_id::<DatasetTag>(source_hash.as_bytes(), b"dataset");
+    let recording_id = derive_id::<RecordingTag>(source_hash.as_bytes(), b"recording");
+
+    let mut draft = DatasetDraft::new(dataset_id);
+    let mut payloads: Vec<(String, Vec<u8>)> = Vec::with_capacity(snapshot.views.len());
+    let mut stream_ids = Vec::with_capacity(snapshot.views.len());
+    let mut entries = Vec::with_capacity(snapshot.views.len() + 1);
+    let mut first_payload_id: Option<String> = None;
+    let mut total_payload_bytes = 0_u64;
+    let mut encoded_views = 0_u64;
+
+    for view in &snapshot.views {
+        // Per-view identities derive from the view's own spec digest, so two
+        // views never collide and the ids are stable across runs.
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(source_hash.as_bytes());
+        hasher.update(b"\0snapshot-view\0");
+        hasher.update(view.name.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(view.spec_sha256.as_bytes());
+        let seed = *hasher.finalize().as_bytes();
+        let stream_id = derive_id::<StreamTag>(&seed, b"stream");
+        let atom_id = derive_id::<AtomTag>(&seed, b"tensor");
+
+        let payload_bytes =
+            u64::try_from(view.payload.len()).map_err(|_| LegacyError::DecodedTooLarge)?;
+        total_payload_bytes = total_payload_bytes
+            .checked_add(payload_bytes)
+            .ok_or(LegacyError::DecodedTooLarge)?;
+        let payload_id = payload_content_id(view.element, &view.payload);
+        if first_payload_id.is_none() {
+            first_payload_id = Some(payload_id.to_string());
+        }
+        let mut shape = vec![snapshot.row_count];
+        shape.extend(view.row_shape.iter().copied());
+        let descriptor = PayloadDescriptor::new(
+            payload_id,
+            payload_bytes,
+            view.element,
+            ByteOrder::Little,
+            if view.decoded {
+                shape.clone()
+            } else {
+                vec![payload_bytes]
+            },
+            Layout::DenseRowMajor,
+            Some(concept(if view.decoded {
+                "abir:encoding/raw"
+            } else {
+                "legacy:encoding/tensor-pack-stored-rows"
+            })?),
+            Some(
+                if view.decoded {
+                    "application/vnd.abir.f32le"
+                } else {
+                    "application/octet-stream"
+                }
+                .to_owned(),
+            ),
+        );
+        // A decoded view keeps its declared row geometry. A stored view is a
+        // flat byte run: giving it the row axes would claim a structure these
+        // bytes were never reinterpreted into.
+        let axes = if view.decoded {
+            let mut axes = vec![SemanticAxis::new(
+                concept("abir:axis/row")?,
+                snapshot.row_count,
+            )];
+            for (index, extent) in view.row_shape.iter().enumerate() {
+                axes.push(SemanticAxis::new(
+                    concept(&format!("legacy:axis/tensor-pack-{index}"))?,
+                    *extent,
+                ));
+            }
+            axes
+        } else {
+            vec![SemanticAxis::new(
+                concept("legacy:axis/stored-byte")?,
+                payload_bytes,
+            )]
+        };
+        draft.add_atom(Atom::Tensor(Tensor::new(
+            atom_id,
+            Presence::Present,
+            Some(descriptor),
+            axes,
+        )));
+        draft.add_stream(Stream::new(
+            stream_id,
+            recording_id,
+            modality_concept(None),
+            vec![atom_id],
+            None,
+            None,
+            None,
+        ));
+        draft.add_fidelity(Fidelity::new(
+            SemanticRef::of(atom_id),
+            FidelityKind::Exact,
+            None,
+            None,
+        ));
+        stream_ids.push(stream_id);
+        payloads.push((format!("view-{}.bin", view.name), view.payload.clone()));
+        entries.push(MappingEntry {
+            source_path: format!("wire.view.{}", view.name),
+            target: format!("atom:{atom_id}"),
+            disposition: if view.decoded {
+                MappingDisposition::Exact
+            } else {
+                MappingDisposition::Quarantined
+            },
+            reason: (!view.decoded).then(|| {
+                format!(
+                    "view dtype tag {} is not f32; its rows are carried stored rather than \
+                     reinterpreted into a type the wire never claimed",
+                    view.dtype
+                )
+            }),
+        });
+        if !view.decoded {
+            encoded_views += 1;
+        }
+    }
+    entries.push(MappingEntry {
+        source_path: "wire.row-identities".to_owned(),
+        target: "abir.source-capsule".to_owned(),
+        disposition: MappingDisposition::Quarantined,
+        reason: Some(
+            "the snapshot binds its row order by manifest digest but carries no per-row identity"
+                .to_owned(),
+        ),
+    });
+
+    let mut recording = Recording::new(recording_id, stream_ids);
+    for (namespace, value) in [
+        ("legacy-source-blake3", source_blake3.clone()),
+        (
+            "tensor-pack.manifest-sha256",
+            snapshot.manifest_sha256.clone(),
+        ),
+        (
+            "tensor-pack.view-spec-sha256",
+            snapshot.view_spec_sha256.clone(),
+        ),
+        ("tensor-pack.row-count", snapshot.row_count.to_string()),
+        (
+            "tensor-pack.metadata-bytes",
+            snapshot.metadata_bytes.to_string(),
+        ),
+    ] {
+        recording.add_source_key(
+            SourceKey::new(namespace, &value)
+                .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?,
+        );
+    }
+    for view in &snapshot.views {
+        recording.add_source_key(
+            SourceKey::new(
+                format!("tensor-pack.view.{}", view.name),
+                format!(
+                    "dtype={},encoding={},spec={}",
+                    view.dtype, view.encoding, view.spec_sha256
+                ),
+            )
+            .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?,
+        );
+    }
+    for key in anchor.source_keys()? {
+        recording.add_source_key(key);
+    }
+    draft.add_recording(recording);
+    draft.add_source_capsule(SourceCapsule::new(
+        SourceKey::new("legacy-source-blake3", &source_blake3)
+            .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?,
+        source_content_id,
+        Some(legacy_media_type(anchor.format)),
+    ));
+    let dataset = draft
+        .validate(ValidationLimits {
+            max_logical_payload_bytes: max_decoded_bytes,
+            ..ValidationLimits::default()
+        })
+        .map_err(|report| LegacyError::SemanticValidation(format!("{report:?}")))?;
+    let dataset_json = canonical_debug_json(&dataset)
+        .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?;
+    let dataset_content_id = logical_content_id(&dataset)
+        .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?;
+
+    let mapping = MappingReport {
+        source_profile: ProfileId(anchor.format.profile().to_owned()),
+        target_profile: ProfileId("abir.semantic-v1".to_owned()),
+        semantic_coverage: SemanticCoverage::ProjectedSemantic,
+        entries,
+        preserved_unknowns: encoded_views + 1,
+        sample_values_changed: false,
+        timing_changed: false,
+    };
+    let mut mapping = mapping;
+    mapping.entries.extend(anchor.extra_mapping.iter().cloned());
+    mapping.preserved_unknowns += anchor.extra_mapping.len() as u64;
+    let mapping_report = serde_json::to_vec_pretty(&mapping)
+        .map_err(|error| LegacyError::InvalidProtocol(error.to_string()))?;
+    let fidelity = SemanticFidelityReport {
+        schema: "lamquant.legacy-fidelity/v1".to_owned(),
+        source_profile: anchor.format.profile().to_owned(),
+        exact_source_restoration: true,
+        exact_sample_values: true,
+        sample_values_changed: false,
+        timing_equivalence: false,
+        modality_equivalence: false,
+        semantic_equivalence: false,
+        source_capsule_file: SOURCE_FILE.to_owned(),
+        caveats: vec![
+            "a training snapshot carries no sampling clock and no biosignal modality".to_owned(),
+            "row identities remain external and are bound only by the manifest digest".to_owned(),
+            format!(
+                "{} of {} view(s) are carried stored because their dtype is not f32",
+                encoded_views,
+                snapshot.views.len()
+            ),
+        ],
+    };
+    let mut fidelity = fidelity;
+    fidelity
+        .caveats
+        .extend(anchor.extra_caveats.iter().cloned());
+    let fidelity_report = serde_json::to_vec_pretty(&fidelity)
+        .map_err(|error| LegacyError::InvalidProtocol(error.to_string()))?;
+    let receipt = SemanticImportReceipt {
+        profile: anchor.format.profile().to_owned(),
+        source_blake3,
+        source_bytes: anchor.bytes.len() as u64,
+        // A snapshot has views, not channels. Report the view count and the
+        // shared row axis rather than inventing a channel geometry.
+        decoded_channels: snapshot.views.len() as u64,
+        decoded_samples_per_channel: snapshot.row_count,
+        decoded_payload_bytes: total_payload_bytes,
+        dataset_content_id: dataset_content_id.to_string(),
+        payload_content_id: first_payload_id.ok_or_else(|| {
+            LegacyError::MalformedContainer("snapshot produced no payload".to_owned())
+        })?,
+        source_preserved: true,
+        exact_sample_values: true,
+        exact_source_restoration: true,
+        semantic_equivalence: false,
+        timing: "unknown-at-source".to_owned(),
+        modality: "legacy:modality/unknown-at-source".to_owned(),
+        semantic_coverage: "projected-semantic".to_owned(),
+    };
+    let semantic_receipt = serde_json::to_vec_pretty(&receipt)
+        .map_err(|error| LegacyError::InvalidProtocol(error.to_string()))?;
+    Ok(SemanticArtifacts {
+        receipt,
+        dataset_json,
+        payloads,
+        mapping_report,
+        fidelity_report,
+        semantic_receipt,
+    })
 }
 
 /// Import an LMQC neural container.

@@ -73,10 +73,28 @@
       "reverse_export": "PASS_EXACT_SOURCE_CAPSULE"
     },
     "legacy.lqtp.v2": {
-      "status": "NOT_CLAIMED"
+      "status": "PASS_PROJECTED",
+      "views": "ONE_STREAM_EACH",
+      "decoded_f32_view_values": "EXACT",
+      "non_f32_views": "CARRIED_STORED",
+      "source_capsule": "EXACT",
+      "timing": "UNKNOWN_AT_SOURCE",
+      "modality": "UNKNOWN_AT_SOURCE",
+      "row_identity": "EXTERNAL_MANIFEST_HASH_ONLY",
+      "reverse_export": "PASS_EXACT_SOURCE_CAPSULE",
+      "generation": "view directory"
     },
     "legacy.lqtp.v3": {
-      "status": "NOT_CLAIMED"
+      "status": "PASS_PROJECTED",
+      "views": "ONE_STREAM_EACH",
+      "decoded_f32_view_values": "EXACT",
+      "non_f32_views": "CARRIED_STORED",
+      "source_capsule": "EXACT",
+      "timing": "UNKNOWN_AT_SOURCE",
+      "modality": "UNKNOWN_AT_SOURCE",
+      "row_identity": "EXTERNAL_MANIFEST_HASH_ONLY",
+      "reverse_export": "PASS_EXACT_SOURCE_CAPSULE",
+      "generation": "chunk directory"
     }
   },
   "reverse_export": "PARTIAL",

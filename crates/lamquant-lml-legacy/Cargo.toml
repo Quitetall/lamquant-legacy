@@ -19,8 +19,11 @@ crate-type = ["rlib"]
 
 [features]
 # The FROZEN v1 DECODER — default ON forever (old .lml/.lma must decode).
-default = ["legacy-decode"]
+default = ["legacy-decode", "legacy-tensor-pack"]
 legacy-decode = []
+# The RETIRED LQTP2/LQTP3 training snapshot wires (ADR 0143/0144). Default ON:
+# the legacy adapter must be able to open them, exactly as with old containers.
+legacy-tensor-pack = ["dep:lamquant-lml-archive", "dep:memmap2", "dep:sha2", "dep:zstd"]
 # The retiring v1 ENCODER — the differential ORACLE; demoted out of default at cutover,
 # kept gated for Step-B forensics, deletable only after Step B ships its own goldens.
 legacy-encode = ["legacy-decode", "dep:lamquant-lml-desktop"]
@@ -33,11 +36,25 @@ lamquant-lml-mcu.workspace = true
 lamquant-lml-desktop = { workspace = true, optional = true }
 # The v1 metadata JSON (`metadata_with_codec_mode`).
 serde_json = { version = "1", features = ["std"] }
+# LQTP1 supplies the block-floating-point row codec LQTP2/LQTP3 reuse.
+lamquant-lml-archive = { workspace = true, optional = true }
+memmap2 = { version = "0.9", optional = true }
+sha2 = { version = "0.10", optional = true }
+zstd = { version = "0.13", optional = true }
+
+# The retired packs open snapshots with O_NOFOLLOW and rename them with
+# renameat2(RENAME_NOREPLACE); both are Unix syscalls with no portable stand-in.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
 
 [dev-dependencies]
 # The moved container/stream tests write to temp files.
 tempfile = "3"
-# ADR 0139 P3: the cross-backend byte-equality example digests encoded payloads.
+# The LQTP3 wire test back-dates a snapshot to prove open-time verification
+# does not depend on wall-clock ordering.
+filetime = "0.2"
+# The retired tensor-pack wire tests digest snapshot bytes; the byte-equality
+# example digests encoded payloads.
 sha2 = "0.10"
 
 # ADR 0139 P3 compute evidence: needs the Desktop tier for both backends.

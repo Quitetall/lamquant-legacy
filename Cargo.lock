@@ -488,11 +488,16 @@ dependencies = [
 name = "lamquant-lml-legacy"
 version = "0.1.1"
 dependencies = [
+ "filetime",
+ "lamquant-lml",
  "lamquant-lml-desktop",
  "lamquant-lml-mcu",
+ "libc",
+ "memmap2",
  "serde_json",
  "sha2",
  "tempfile",
+ "zstd",
 ]
 
 [[package]]

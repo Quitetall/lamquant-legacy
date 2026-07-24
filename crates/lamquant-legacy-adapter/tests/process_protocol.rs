@@ -572,14 +572,12 @@ fn semantic_import_bounds_decoded_allocation_before_output() {
 }
 
 #[test]
-fn unsupported_profile_does_not_overstate_semantic_import() {
+fn every_declared_capability_is_backed_and_unknown_magic_is_refused() {
     let temp = tempfile::tempdir().unwrap();
-    let source = temp.path().join("input.lqtp2");
+    let source = temp.path().join("input.bin");
     let output = temp.path().join("semantic");
-    // LMA, LMQC and LMLCRYPT all import semantically now, so this fixture must
-    // use a profile that is still genuinely unsupported for the assertion to
-    // mean anything. LQTP2 is recognised but has no importer.
-    fs::write(&source, b"LQT2payload").unwrap();
+    // Nothing recognises this, so nothing may be written.
+    fs::write(&source, b"NOPEpayload").unwrap();
     let error = import_semantic(&SemanticImportRequest {
         source,
         destination: output.clone(),
@@ -588,26 +586,23 @@ fn unsupported_profile_does_not_overstate_semantic_import() {
         max_decoded_bytes: 1024,
     })
     .unwrap_err();
-    assert_eq!(error, LegacyError::SemanticImportUnsupported);
+    assert_eq!(error, LegacyError::UnknownMagic);
     assert!(!output.exists());
+
+    // Every retired profile now claims semantic import and reverse export.
+    // The claims are only meaningful because each is exercised end to end by a
+    // test in this file against a real fixture of that wire; the invariant kept
+    // here is that no profile can claim re-emission it cannot also import.
     let manifest = capability_manifest();
-    assert!(
-        manifest
-            .capabilities
-            .iter()
-            .find(|value| value.profile == "legacy.bcs1.v1")
-            .unwrap()
-            .semantic_import
-    );
-    // LQTP2 is the remaining unsupported profile: recognised, never imported.
-    assert!(
-        !manifest
-            .capabilities
-            .iter()
-            .find(|value| value.profile == "legacy.lqtp.v2")
-            .unwrap()
-            .semantic_import
-    );
+    assert_eq!(manifest.capabilities.len(), 9);
+    for capability in &manifest.capabilities {
+        assert!(capability.inspect && capability.forensic_import);
+        assert!(
+            !capability.reverse_export || capability.semantic_import,
+            "{} claims reverse export without semantic import",
+            capability.profile,
+        );
+    }
 }
 
 #[test]
@@ -677,10 +672,22 @@ fn committed_converter_matrix_scopes_semantic_claims_per_profile() {
         matrix["semantic_profiles"]["legacy.lmlcrypt.v1"]["key_material"],
         "NEVER_IN_DATASET"
     );
-    assert_eq!(
-        matrix["semantic_profiles"]["legacy.lqtp.v2"]["status"],
-        "NOT_CLAIMED"
-    );
+    // The retired tensor packs name what they carried and what they did not:
+    // one stream per view, exact decoded f32 values, non-f32 views stored.
+    for generation in ["legacy.lqtp.v2", "legacy.lqtp.v3"] {
+        assert_eq!(
+            matrix["semantic_profiles"][generation]["views"],
+            "ONE_STREAM_EACH"
+        );
+        assert_eq!(
+            matrix["semantic_profiles"][generation]["non_f32_views"],
+            "CARRIED_STORED"
+        );
+        assert_eq!(
+            matrix["semantic_profiles"][generation]["row_identity"],
+            "EXTERNAL_MANIFEST_HASH_ONLY"
+        );
+    }
     assert_eq!(
         matrix["semantic_profiles"]["legacy.lqtp.v1"]["status"],
         "PASS_PROJECTED"
@@ -1105,4 +1112,209 @@ fn archive_with_a_broken_integrity_trailer_is_refused_before_output() {
     assert!(matches!(error, LegacyError::MalformedContainer(_)));
     assert!(!output.exists());
     assert!(inspect(&source, 1 << 20).is_err());
+}
+
+/// A two-row LQTP2 snapshot with one f32 BFP view and one u8 raw view.
+fn lqtp2_source(path: &std::path::Path) -> Vec<u8> {
+    use lamquant_lml_legacy::tensor_pack_v2::{
+        PackV2Dtype, PackV2Encoding, PackV2Writer, ViewSpec,
+    };
+    let specs = vec![
+        ViewSpec::new(
+            "fullband",
+            PackV2Dtype::F32,
+            PackV2Encoding::BfpInt16,
+            &[2, 3],
+            true,
+            [0x11; 32],
+        )
+        .unwrap(),
+        ViewSpec::new(
+            "labels",
+            PackV2Dtype::U8,
+            PackV2Encoding::Raw,
+            &[4],
+            true,
+            [0x22; 32],
+        )
+        .unwrap(),
+    ];
+    let mut writer = PackV2Writer::create(
+        path,
+        2,
+        [0xaa; 32],
+        [0xbb; 32],
+        br#"{"schema":"lamquant.training-window-metadata/1"}"#.to_vec(),
+        specs,
+    )
+    .unwrap();
+    for row in 0..2_u8 {
+        let offset = f32::from(row) * 10.0;
+        writer
+            .write_f32_row(
+                "fullband",
+                &[
+                    1.0 + offset,
+                    -2.0 - offset,
+                    3.0 + offset,
+                    4.0 + offset,
+                    -5.0 - offset,
+                    6.0 + offset,
+                ],
+            )
+            .unwrap();
+        writer
+            .write_raw_row("labels", &[row, row + 1, row + 2, row + 3])
+            .unwrap();
+    }
+    writer.finish().unwrap();
+    fs::read(path).unwrap()
+}
+
+/// A four-row LQTP3 chunked bundle: one zstd-compressed BFP view and one
+/// uncompressed raw view, so both chunk codecs are exercised.
+fn lqtp3_source(path: &std::path::Path) -> Vec<u8> {
+    use lamquant_lml_legacy::tensor_pack_v3::{
+        PackV3Compression, PackV3Dtype, PackV3Encoding, PackV3Writer, ViewSpecV3,
+    };
+    let specs = vec![
+        ViewSpecV3::new(
+            "fullband",
+            PackV3Dtype::F32,
+            PackV3Encoding::BfpInt16,
+            &[2, 3],
+            true,
+            [0x11; 32],
+            2,
+            PackV3Compression::Zstd,
+            1,
+        )
+        .unwrap(),
+        ViewSpecV3::new(
+            "labels",
+            PackV3Dtype::U8,
+            PackV3Encoding::Raw,
+            &[4],
+            true,
+            [0x22; 32],
+            3,
+            PackV3Compression::None,
+            0,
+        )
+        .unwrap(),
+    ];
+    let mut writer = PackV3Writer::create(
+        path,
+        4,
+        [0xaa; 32],
+        [0xbb; 32],
+        br#"{"schema":"lamquant.training-window-metadata/1"}"#.to_vec(),
+        specs,
+    )
+    .unwrap();
+    for row in 0..4_u8 {
+        let offset = f32::from(row) * 10.0;
+        writer
+            .write_f32_row(
+                "fullband",
+                &[
+                    1.0 + offset,
+                    -2.0 - offset,
+                    3.0 + offset,
+                    4.0 + offset,
+                    -5.0 - offset,
+                    6.0 + offset,
+                ],
+            )
+            .unwrap();
+        writer
+            .write_raw_row("labels", &[row, row + 1, row + 2, row + 3])
+            .unwrap();
+    }
+    writer.finish().unwrap();
+    fs::read(path).unwrap()
+}
+
+#[test]
+fn retired_tensor_packs_import_one_stream_per_view_and_re_emit_exactly() {
+    for (profile, rows, format, build) in [
+        (
+            "legacy.lqtp.v2",
+            2_u64,
+            LegacyFormat::Lqtp2,
+            lqtp2_source as fn(&std::path::Path) -> Vec<u8>,
+        ),
+        (
+            "legacy.lqtp.v3",
+            4,
+            LegacyFormat::Lqtp3,
+            lqtp3_source as fn(&std::path::Path) -> Vec<u8>,
+        ),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("snapshot.pack");
+        let bytes = build(&source);
+
+        let output = temp.path().join("semantic");
+        let receipt = import_semantic(&SemanticImportRequest {
+            source: source.clone(),
+            destination: output.clone(),
+            accept_fidelity: true,
+            max_source_bytes: 1 << 20,
+            max_decoded_bytes: 1 << 20,
+        })
+        .unwrap();
+
+        assert_eq!(receipt.profile, profile);
+        // Views, not channels: the snapshot has two views over a shared row
+        // axis, and the receipt must not invent a channel geometry.
+        assert_eq!(receipt.decoded_channels, 2);
+        assert_eq!(receipt.decoded_samples_per_channel, rows);
+        assert!(receipt.exact_source_restoration);
+        assert!(!receipt.semantic_equivalence);
+
+        // One payload file per view; the archive is never flattened.
+        assert_eq!(
+            fs::read(output.join("view-fullband.bin")).unwrap().len(),
+            (rows as usize) * 6 * 4,
+            "f32 view decodes to rows x 6 f32 values",
+        );
+        // The u8 view is carried STORED, not reinterpreted as f32.
+        assert_eq!(
+            fs::read(output.join("view-labels.bin")).unwrap(),
+            (0..rows as u8)
+                .flat_map(|row| [row, row + 1, row + 2, row + 3])
+                .collect::<Vec<u8>>(),
+        );
+        let mapping: serde_json::Value =
+            serde_json::from_slice(&fs::read(output.join("mapping-report.json")).unwrap()).unwrap();
+        let dispositions: Vec<&str> = mapping["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["disposition"].as_str().unwrap())
+            .collect();
+        assert!(dispositions.contains(&"exact"));
+        assert!(dispositions.contains(&"quarantined"));
+
+        // Reverse export re-emits the retired snapshot byte for byte.
+        let out = temp.path().join("reemitted.pack");
+        let export = export_semantic(&SemanticExportRequest {
+            format,
+            dataset: output.join("dataset.json"),
+            payloads: vec![ExportPayload {
+                content_id: abir::payload_content_id(abir::ElementType::Bytes, &bytes).to_string(),
+                path: source,
+            }],
+            destination: out.clone(),
+            accept_fidelity: true,
+            max_dataset_bytes: 1 << 20,
+            max_payload_bytes: 1 << 20,
+            max_output_bytes: 1 << 20,
+            window_size: 1,
+        })
+        .unwrap();
+        assert_eq!(export.profile, profile);
+        assert_eq!(fs::read(out.join("legacy-output.bin")).unwrap(), bytes);
+    }
 }

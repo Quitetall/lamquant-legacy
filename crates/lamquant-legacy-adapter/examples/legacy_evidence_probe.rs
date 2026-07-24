@@ -254,6 +254,133 @@ fn seal(plaintext: &[u8], nonce: &[u8; 12]) -> Vec<u8> {
     blob
 }
 
+/// A retired multi-view training snapshot. Two views so the fixture exercises
+/// both an f32 view (decoded) and a u8 view (carried stored), and `seed` varies
+/// the label bytes so a second snapshot is genuinely a different file.
+fn tensor_pack_v2(seed: u8) -> Vec<u8> {
+    use lamquant_lml_legacy::tensor_pack_v2::{
+        PackV2Dtype, PackV2Encoding, PackV2Writer, ViewSpec,
+    };
+    let scratch = tempfile::tempdir().expect("scratch directory");
+    let path = scratch.path().join("snapshot.lqtp2");
+    let specs = vec![
+        ViewSpec::new(
+            "fullband",
+            PackV2Dtype::F32,
+            PackV2Encoding::BfpInt16,
+            &[2, 3],
+            true,
+            [0x11; 32],
+        )
+        .expect("f32 view spec"),
+        ViewSpec::new(
+            "labels",
+            PackV2Dtype::U8,
+            PackV2Encoding::Raw,
+            &[4],
+            true,
+            [0x22; 32],
+        )
+        .expect("u8 view spec"),
+    ];
+    let mut writer = PackV2Writer::create(
+        &path,
+        2,
+        [0xaa; 32],
+        [0xbb; 32],
+        br#"{"schema":"lamquant.training-window-metadata/1"}"#.to_vec(),
+        specs,
+    )
+    .expect("snapshot writer");
+    for row in 0..2_u8 {
+        let offset = f32::from(row) * 10.0;
+        writer
+            .write_f32_row(
+                "fullband",
+                &[
+                    1.0 + offset,
+                    -2.0 - offset,
+                    3.0 + offset,
+                    4.0 + offset,
+                    -5.0 - offset,
+                    6.0 + offset,
+                ],
+            )
+            .expect("f32 row");
+        writer
+            .write_raw_row("labels", &[seed + row, row + 1, row + 2, row + 3])
+            .expect("raw row");
+    }
+    writer.finish().expect("snapshot publishes");
+    std::fs::read(&path).expect("snapshot reads back")
+}
+
+/// The chunked generation: one zstd-compressed view and one uncompressed one,
+/// so both chunk codecs are on the evidence path.
+fn tensor_pack_v3(seed: u8) -> Vec<u8> {
+    use lamquant_lml_legacy::tensor_pack_v3::{
+        PackV3Compression, PackV3Dtype, PackV3Encoding, PackV3Writer, ViewSpecV3,
+    };
+    let scratch = tempfile::tempdir().expect("scratch directory");
+    let path = scratch.path().join("snapshot.lqtp3");
+    let specs = vec![
+        ViewSpecV3::new(
+            "fullband",
+            PackV3Dtype::F32,
+            PackV3Encoding::BfpInt16,
+            &[2, 3],
+            true,
+            [0x11; 32],
+            2,
+            PackV3Compression::Zstd,
+            1,
+        )
+        .expect("f32 view spec"),
+        ViewSpecV3::new(
+            "labels",
+            PackV3Dtype::U8,
+            PackV3Encoding::Raw,
+            &[4],
+            true,
+            [0x22; 32],
+            3,
+            PackV3Compression::None,
+            0,
+        )
+        .expect("u8 view spec"),
+    ];
+    let mut writer = PackV3Writer::create(
+        &path,
+        4,
+        [0xaa; 32],
+        [0xbb; 32],
+        br#"{"schema":"lamquant.training-window-metadata/1"}"#.to_vec(),
+        specs,
+    )
+    .expect("snapshot writer");
+    for row in 0..4_u8 {
+        let offset = f32::from(row) * 10.0;
+        writer
+            .write_f32_row(
+                "fullband",
+                &[
+                    1.0 + offset,
+                    -2.0 - offset,
+                    3.0 + offset,
+                    4.0 + offset,
+                    -5.0 - offset,
+                    6.0 + offset,
+                ],
+            )
+            .expect("f32 row");
+        writer
+            .write_raw_row("labels", &[seed + row, row + 1, row + 2, row + 3])
+            .expect("raw row");
+    }
+    writer.finish().expect("snapshot publishes");
+    std::fs::read(&path).expect("snapshot reads back")
+}
+
 /// Every corruption a retired container can arrive with. Each must be refused
 /// before any output is produced.
 fn malformed_variants(valid: &[u8]) -> Vec<(String, Vec<u8>)> {
@@ -311,6 +438,14 @@ fn build_lmlcrypt() -> Vec<u8> {
     seal(&archive_entries().remove(0).1, &[7; 12])
 }
 
+fn build_lqtp2() -> Vec<u8> {
+    tensor_pack_v2(0)
+}
+
+fn build_lqtp3() -> Vec<u8> {
+    tensor_pack_v3(0)
+}
+
 const PROFILES: &[Profile] = &[
     Profile {
         id: "legacy.lma.v1",
@@ -327,6 +462,14 @@ const PROFILES: &[Profile] = &[
     Profile {
         id: "legacy.lmlcrypt.v1",
         build: build_lmlcrypt,
+    },
+    Profile {
+        id: "legacy.lqtp.v2",
+        build: build_lqtp2,
+    },
+    Profile {
+        id: "legacy.lqtp.v3",
+        build: build_lqtp3,
     },
 ];
 
@@ -544,6 +687,8 @@ fn measure(profile: &Profile, role: &str) -> BTreeMap<String, Assertion> {
                     )
                     .expect("second fixture encodes")
                 }
+                "legacy.lqtp.v2" => tensor_pack_v2(64),
+                "legacy.lqtp.v3" => tensor_pack_v3(64),
                 // A different nonce over a different plaintext.
                 _ => seal(&other_entries[0].1, &[9; 12]),
             };

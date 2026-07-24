@@ -55,15 +55,15 @@
       "profile": "legacy.lqtp.v2",
       "inspect": true,
       "forensic_import": true,
-      "semantic_import": false,
-      "reverse_export": false
+      "semantic_import": true,
+      "reverse_export": true
     },
     {
       "profile": "legacy.lqtp.v3",
       "inspect": true,
       "forensic_import": true,
-      "semantic_import": false,
-      "reverse_export": false
+      "semantic_import": true,
+      "reverse_export": true
     }
   ]
 }

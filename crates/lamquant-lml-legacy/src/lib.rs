@@ -32,3 +32,12 @@ pub mod container;
 pub mod offset_table;
 #[cfg(feature = "legacy-decode")]
 pub mod stream;
+
+// The RETIRED training tensor packs (ADR 0143 / 0144). LQTP1 stays in the codec
+// as the live pack; LQTP2 (`LQT2`) and LQTP3 (`LQT3`) never reached main and are
+// frozen here so old snapshots decode forever and the legacy adapter can open
+// them. `bcs.training.lqtp.v1+` supersedes both; there is no standalone LQTP4.
+#[cfg(feature = "legacy-tensor-pack")]
+pub mod tensor_pack_v2;
+#[cfg(feature = "legacy-tensor-pack")]
+pub mod tensor_pack_v3;
