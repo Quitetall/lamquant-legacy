@@ -699,23 +699,13 @@ fn export_lqtp1_exact(
     result
 }
 
-fn resolve_export_signal(
-    dataset: &abir::AbirDataset,
+/// One decoded recording: per-channel samples, sample rate in Hz, modality tag.
+type ExportSignal = (Vec<Vec<i64>>, f64, u8);
+
+/// Build the ContentId -> payload path index, rejecting duplicate identities.
+fn export_payload_paths(
     payloads: &[ExportPayload],
-    max_payload_bytes: u64,
-) -> Result<(Vec<Vec<i64>>, f64, u8), LegacyError> {
-    if dataset.recordings().len() != 1 || dataset.streams().len() != 1 {
-        return Err(LegacyError::SemanticExportUnsupported);
-    }
-    let recording = &dataset.recordings()[0];
-    let stream = &dataset.streams()[0];
-    if recording.streams() != [stream.id()]
-        || stream.recording_id() != recording.id()
-        || stream.atoms().is_empty()
-        || stream.atoms().len() != dataset.atoms().len()
-    {
-        return Err(LegacyError::SemanticExportUnsupported);
-    }
+) -> Result<std::collections::BTreeMap<&str, &Path>, LegacyError> {
     let mut paths = std::collections::BTreeMap::new();
     for payload in payloads {
         if paths
@@ -727,9 +717,107 @@ fn resolve_export_signal(
             ));
         }
     }
-    let mut total_payload_bytes = 0_u64;
-    let mut signal = Vec::new();
+    Ok(paths)
+}
+
+/// Resolve a single-recording dataset to one signal (the LML/BCS1 export path).
+fn resolve_export_signal(
+    dataset: &abir::AbirDataset,
+    payloads: &[ExportPayload],
+    max_payload_bytes: u64,
+) -> Result<ExportSignal, LegacyError> {
+    if dataset.recordings().len() != 1 || dataset.streams().len() != 1 {
+        return Err(LegacyError::SemanticExportUnsupported);
+    }
+    let recording = &dataset.recordings()[0];
+    let stream = &dataset.streams()[0];
+    if recording.streams() != [stream.id()]
+        || stream.recording_id() != recording.id()
+        || stream.atoms().len() != dataset.atoms().len()
+    {
+        return Err(LegacyError::SemanticExportUnsupported);
+    }
+    let paths = export_payload_paths(payloads)?;
     let mut used_payloads = std::collections::BTreeSet::new();
+    let mut total_payload_bytes = 0_u64;
+    let resolved = decode_stream_signal(
+        dataset,
+        stream,
+        &paths,
+        &mut used_payloads,
+        &mut total_payload_bytes,
+        max_payload_bytes,
+    )?;
+    // Every supplied payload must have been consumed, or the caller handed us
+    // bytes this dataset does not describe.
+    if used_payloads.len() != paths.len() {
+        return Err(LegacyError::SemanticExportUnsupported);
+    }
+    Ok(resolved)
+}
+
+/// Resolve a multi-recording dataset to one signal per recording, in dataset
+/// order. Used by the archive export path, where each recording re-emits its
+/// own container.
+#[allow(dead_code)]
+fn resolve_export_signals(
+    dataset: &abir::AbirDataset,
+    payloads: &[ExportPayload],
+    max_payload_bytes: u64,
+) -> Result<Vec<ExportSignal>, LegacyError> {
+    if dataset.recordings().is_empty() {
+        return Err(LegacyError::SemanticExportUnsupported);
+    }
+    let paths = export_payload_paths(payloads)?;
+    let mut used_payloads = std::collections::BTreeSet::new();
+    let mut total_payload_bytes = 0_u64;
+    let mut resolved = Vec::with_capacity(dataset.recordings().len());
+    for recording in dataset.recordings() {
+        // Each recording owns exactly one stream in an archive projection.
+        let [stream_id] = recording.streams() else {
+            return Err(LegacyError::SemanticExportUnsupported);
+        };
+        let stream = dataset
+            .streams()
+            .iter()
+            .find(|stream| stream.id() == *stream_id)
+            .ok_or(LegacyError::SemanticExportUnsupported)?;
+        if stream.recording_id() != recording.id() {
+            return Err(LegacyError::SemanticExportUnsupported);
+        }
+        resolved.push(decode_stream_signal(
+            dataset,
+            stream,
+            &paths,
+            &mut used_payloads,
+            &mut total_payload_bytes,
+            max_payload_bytes,
+        )?);
+    }
+    if used_payloads.len() != paths.len() {
+        return Err(LegacyError::SemanticExportUnsupported);
+    }
+    Ok(resolved)
+}
+
+/// Bind one stream's atoms to their payloads and decode that stream's signal.
+///
+/// Shared by the single-recording resolver and the multi-recording archive
+/// resolver so both apply exactly the same atom, descriptor, and shape checks.
+/// Whether every supplied payload was consumed is a whole-dataset invariant and
+/// is therefore asserted by the caller, not here.
+fn decode_stream_signal(
+    dataset: &abir::AbirDataset,
+    stream: &abir::Stream,
+    paths: &std::collections::BTreeMap<&str, &Path>,
+    used_payloads: &mut std::collections::BTreeSet<String>,
+    total_payload_bytes: &mut u64,
+    max_payload_bytes: u64,
+) -> Result<ExportSignal, LegacyError> {
+    if stream.atoms().is_empty() {
+        return Err(LegacyError::SemanticExportUnsupported);
+    }
+    let mut signal = Vec::new();
     let mut rate = None;
     let mut samples = None;
     for atom_id in stream.atoms() {
@@ -775,10 +863,10 @@ fn resolve_export_signal(
             .copied()
             .ok_or(LegacyError::PayloadIdentityMismatch)?;
         used_payloads.insert(descriptor_id);
-        total_payload_bytes = total_payload_bytes
+        *total_payload_bytes = total_payload_bytes
             .checked_add(descriptor.logical_bytes())
             .ok_or(LegacyError::DecodedTooLarge)?;
-        if total_payload_bytes > max_payload_bytes {
+        if *total_payload_bytes > max_payload_bytes {
             return Err(LegacyError::DecodedTooLarge);
         }
         let bytes = read_bounded(path, descriptor.logical_bytes())?;
@@ -805,8 +893,7 @@ fn resolve_export_signal(
             _ => return Err(LegacyError::SemanticExportUnsupported),
         }
     }
-    if used_payloads.len() != paths.len()
-        || signal.is_empty()
+    if signal.is_empty()
         || signal.len() > u16::MAX as usize
         || signal.first().map_or(0, Vec::len) > u32::MAX as usize
     {
