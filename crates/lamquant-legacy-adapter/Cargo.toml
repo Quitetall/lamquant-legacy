@@ -23,6 +23,7 @@ libc.workspace = true
 
 [dev-dependencies]
 lamquant-lml-mcu.workspace = true
+sha2.workspace = true
 
 [[bin]]
 name = "lamquant-legacy-adapter"

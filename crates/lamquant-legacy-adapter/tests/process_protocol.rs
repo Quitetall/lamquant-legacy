@@ -4,6 +4,7 @@ use lamquant_legacy_adapter::{
     SemanticImportRequest,
 };
 use lamquant_legacy_ir::{Bcs1Header, BCS1_VERSION_MAJOR, BCS1_VERSION_MINOR, CODEC_LML_53};
+use sha2::{Digest, Sha256};
 use std::fs;
 
 fn source_signal() -> Vec<Vec<i64>> {
@@ -687,8 +688,80 @@ fn source_symlink_is_rejected_without_output() {
     assert!(!output.exists());
 }
 
+/// An `LMA1` front-manifest archive holding one LML1 recording beside one
+/// non-signal sibling. Nothing writes v1 any more, so the retired generation
+/// only exists framed by hand; `pack_lml_entries` cannot stand in for it
+/// because it emits v2 and marks every entry as LML.
+fn lma_v1_archive(recording: &[u8], sidecar: (&str, &[u8])) -> Vec<u8> {
+    let digest = |bytes: &[u8]| format!("{:x}", Sha256::digest(bytes));
+    let manifest = format!(
+        "{{\"compressor\":\"zstd\",\"compressor_level\":3,\"files\":[\
+         {{\"path\":\"a.lml\",\"original_size\":{n},\"compressed_size\":{n},\"method\":\"lml\",\
+         \"sha256\":\"{lml}\",\"offset\":0}},\
+         {{\"path\":\"{name}\",\"original_size\":{m},\"compressed_size\":{m},\"method\":\"store\",\
+         \"sha256\":\"{side}\",\"offset\":{n}}}]}}",
+        n = recording.len(),
+        m = sidecar.1.len(),
+        name = sidecar.0,
+        lml = digest(recording),
+        side = digest(sidecar.1),
+    )
+    .into_bytes();
+
+    let mut archive = Vec::new();
+    archive.extend_from_slice(b"LMA1");
+    archive.extend_from_slice(&1_u32.to_le_bytes());
+    archive.extend_from_slice(&2_u32.to_le_bytes());
+    // Top bit marks the manifest as stored rather than zstd.
+    archive.extend_from_slice(&((manifest.len() as u32) | 0x8000_0000).to_le_bytes());
+    archive.extend_from_slice(&manifest);
+    archive.extend_from_slice(recording);
+    archive.extend_from_slice(sidecar.1);
+    let digest = Sha256::digest(&archive);
+    archive.extend_from_slice(&digest);
+    archive
+}
+
 #[test]
-fn lma_v1_semantic_import_emits_one_recording_per_archived_signal() {
+fn lma_v1_front_manifest_imports_and_quarantines_its_non_signal_sibling() {
+    let temp = tempfile::tempdir().unwrap();
+    let archive = temp.path().join("input.lma");
+    let bytes = lma_v1_archive(
+        &lml1_source_from_bcs1(&bcs1_source()),
+        ("annotations.tse", b"0.0 1.0 bckg 1.0000\n"),
+    );
+    fs::write(&archive, &bytes).unwrap();
+    assert!(bytes.starts_with(b"LMA1"));
+
+    let output = temp.path().join("semantic");
+    let receipt = import_semantic(&SemanticImportRequest {
+        source: archive,
+        destination: output.clone(),
+        accept_fidelity: true,
+        max_source_bytes: 1 << 20,
+        max_decoded_bytes: 1 << 20,
+    })
+    .unwrap();
+
+    // The v1 generation reports itself as v1 rather than borrowing v2's name.
+    assert_eq!(receipt.profile, "legacy.lma.v1");
+    assert!(receipt.exact_source_restoration);
+    assert!(!receipt.semantic_equivalence);
+
+    // Exactly one recording: the stored sibling is never promoted to a signal.
+    let payloads = fs::read_dir(&output)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("payload-"))
+        .count();
+    assert_eq!(payloads, 1);
+    let mapping: serde_json::Value =
+        serde_json::from_slice(&fs::read(output.join("mapping-report.json")).unwrap()).unwrap();
+    assert_eq!(mapping["preserved_unknowns"], 1);
+}
+
+#[test]
+fn lma_v2_semantic_import_emits_one_recording_per_archived_signal() {
     // A legacy-framed archive: two LML1 entries plus one non-signal sibling.
     // Built with pack_lml_entries so the fixture carries the LEGACY wire this
     // adapter exists to read, rather than whatever the current codec emits.
