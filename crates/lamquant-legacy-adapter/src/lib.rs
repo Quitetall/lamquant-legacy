@@ -58,7 +58,10 @@ impl LegacyFormat {
     }
 
     pub const fn supports_semantic_import(self) -> bool {
-        matches!(self, Self::Bcs1 | Self::Lml1 | Self::Lqtp1)
+        matches!(
+            self,
+            Self::Bcs1 | Self::Lml1 | Self::Lqtp1 | Self::Lma1 | Self::Lma2
+        )
     }
 
     pub const fn supports_reverse_export(self) -> bool {
@@ -81,8 +84,13 @@ struct ContainerFacts {
 struct SemanticArtifacts {
     receipt: SemanticImportReceipt,
     dataset_json: Vec<u8>,
-    payload_file: &'static str,
-    payload: Vec<u8>,
+    /// One payload per imported recording, as `(file name, bytes)`.
+    ///
+    /// A single-stream container yields exactly one entry. An archive yields
+    /// one entry per contained recording, so a multi-recording archive is never
+    /// collapsed into a single synthetic signal — that would report semantics
+    /// the source never carried.
+    payloads: Vec<(String, Vec<u8>)>,
     mapping_report: Vec<u8>,
     fidelity_report: Vec<u8>,
     semantic_receipt: Vec<u8>,
@@ -462,6 +470,11 @@ pub fn import_semantic(
     }
     let artifacts = if format == LegacyFormat::Lqtp1 {
         build_lqtp1_artifacts(&source, request.max_decoded_bytes)?
+    } else if matches!(format, LegacyFormat::Lma1 | LegacyFormat::Lma2) {
+        // An archive is a directory tree, not one LML stream, so it cannot go
+        // through the single-container decode path below. The archive reader
+        // resolves either generation's layout, so v1 and v2 share this path.
+        build_lma_artifacts(&source, request.max_decoded_bytes, format)?
     } else {
         let facts = inspect_container(&source, format, request.max_decoded_bytes)?;
         let decode_source = decode_source(&source, format)?;
@@ -488,7 +501,9 @@ pub fn import_semantic(
         let root = temporary.path();
         write_new(&root.join(SOURCE_FILE), &source)?;
         write_new(&root.join(DATASET_FILE), &artifacts.dataset_json)?;
-        write_new(&root.join(artifacts.payload_file), &artifacts.payload)?;
+        for (name, bytes) in &artifacts.payloads {
+            write_new(&root.join(name), bytes)?;
+        }
         write_new(&root.join(MAPPING_REPORT_FILE), &artifacts.mapping_report)?;
         write_new(&root.join(FIDELITY_REPORT_FILE), &artifacts.fidelity_report)?;
         write_new(
@@ -1027,6 +1042,327 @@ fn verify_decoded_shape(signal: &[Vec<i64>], facts: &ContainerFacts) -> Result<(
     Ok(())
 }
 
+/// Project an LMA archive to one ABIR dataset holding one recording per
+/// contained LML entry.
+///
+/// An archive is a directory tree, not a single signal, so it is never
+/// flattened into one synthetic recording: each LML entry contributes its own
+/// Recording/Stream/Atom and its own payload file. Entries the archive stored
+/// or zstd-compressed verbatim (`Method::Zstd` / `Method::Store`) are NOT
+/// signals — they are counted and named in the mapping report and remain
+/// byte-exact in the source capsule, but they are never promoted to recordings.
+fn build_lma_artifacts(
+    source: &[u8],
+    max_decoded_bytes: u64,
+    format: LegacyFormat,
+) -> Result<SemanticArtifacts, LegacyError> {
+    use lamquant_lml_archive::lma;
+
+    // The archive readers are path-based; stage the in-memory source once.
+    let mut temporary = tempfile::NamedTempFile::new().map_err(io_error)?;
+    temporary.write_all(source).map_err(io_error)?;
+    temporary.flush().map_err(io_error)?;
+    let archive_path = temporary.path();
+    let entries = lma::list_archive(archive_path)
+        .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+
+    let source_hash = blake3::hash(source);
+    let source_blake3 = source_hash.to_hex().to_string();
+    let dataset_id = derive_id::<DatasetTag>(source_hash.as_bytes(), b"dataset");
+    let source_content_id = payload_content_id(ElementType::Bytes, source);
+    let mut draft = DatasetDraft::new(dataset_id);
+
+    let mut payloads: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut total_payload_bytes: u64 = 0;
+    let mut total_channels: u64 = 0;
+    let mut total_samples: u64 = 0;
+    let mut signal_entries: u64 = 0;
+    let mut sibling_entries: u64 = 0;
+    let mut first_payload_id: Option<String> = None;
+    let mut timing_known = true;
+
+    for (index, entry) in entries.iter().enumerate() {
+        if entry.method != lma::Method::Lml {
+            sibling_entries += 1;
+            continue;
+        }
+        let stored = lma::read_entry(archive_path, &entry.path)
+            .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+        // Archived signal entries may be either container generation (the codec
+        // emits BCS1 today, older archives hold LML1), so normalise to the LML1
+        // wire the legacy decoder reads rather than assuming one of them.
+        let entry_format = detect_format(&stored)?;
+        if !matches!(entry_format, LegacyFormat::Bcs1 | LegacyFormat::Lml1) {
+            return Err(LegacyError::MalformedContainer(format!(
+                "archive signal entry {} is not an LML-family container",
+                entry.path
+            )));
+        }
+        let encoded = decode_source(&stored, entry_format)?.into_owned();
+        let header = lamquant_lml_legacy::container::parse_header(&encoded)
+            .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+        let channels = u64::try_from(header.n_ch).map_err(|_| LegacyError::DecodedTooLarge)?;
+        let samples =
+            u64::try_from(header.total_samples).map_err(|_| LegacyError::DecodedTooLarge)?;
+        let entry_bytes = channels
+            .checked_mul(samples)
+            .and_then(|value| value.checked_mul(8))
+            .ok_or(LegacyError::DecodedTooLarge)?;
+        total_payload_bytes = total_payload_bytes
+            .checked_add(entry_bytes)
+            .ok_or(LegacyError::DecodedTooLarge)?;
+        if total_payload_bytes > max_decoded_bytes {
+            return Err(LegacyError::DecodedTooLarge);
+        }
+
+        let signal = lamquant_lml_legacy::container::read_bytes(&encoded)
+            .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?
+            .0;
+        let mut payload = Vec::with_capacity(
+            usize::try_from(entry_bytes).map_err(|_| LegacyError::DecodedTooLarge)?,
+        );
+        for channel in signal {
+            for sample in channel {
+                payload.extend_from_slice(&sample.to_le_bytes());
+            }
+        }
+        if u64::try_from(payload.len()).ok() != Some(entry_bytes) {
+            return Err(LegacyError::MalformedContainer(
+                "archive entry decoded to a shape its header did not declare".to_owned(),
+            ));
+        }
+
+        // Per-entry identities are derived from the entry's own manifest digest
+        // so two entries never collide and the ids are stable across runs.
+        let mut entry_hasher = blake3::Hasher::new();
+        entry_hasher.update(source_hash.as_bytes());
+        entry_hasher.update(b"\0lma-entry\0");
+        entry_hasher.update(entry.path.as_bytes());
+        entry_hasher.update(b"\0");
+        entry_hasher.update(entry.sha256.as_bytes());
+        let entry_seed = *entry_hasher.finalize().as_bytes();
+        let recording_id = derive_id::<RecordingTag>(&entry_seed, b"recording");
+        let stream_id = derive_id::<StreamTag>(&entry_seed, b"stream");
+        let atom_id = derive_id::<AtomTag>(&entry_seed, b"signal");
+        let clock_id = derive_id::<ClockTag>(&entry_seed, b"clock");
+
+        let payload_id = payload_content_id(ElementType::I64, &payload);
+        if first_payload_id.is_none() {
+            first_payload_id = Some(payload_id.to_string());
+        }
+        let descriptor = PayloadDescriptor::new(
+            payload_id,
+            entry_bytes,
+            ElementType::I64,
+            ByteOrder::Little,
+            vec![channels, samples],
+            Layout::DenseRowMajor,
+            Some(concept("abir:encoding/raw")?),
+            Some("application/vnd.abir.i64le".to_owned()),
+        );
+        let rate_millihz = sample_rate_millihz(&encoded, entry_format, &header.metadata);
+        if rate_millihz.is_none() {
+            timing_known = false;
+        }
+        let (atom, stream_clock) = if let Some(millihz) = rate_millihz {
+            let rate = Rational::new(i128::from(millihz), 1000)
+                .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?;
+            let segment = TimeSegment::new(
+                Rational::new(0, 1).expect("zero rational is valid"),
+                rate,
+                samples,
+            )
+            .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?;
+            (
+                Atom::SignalBlock(SignalBlock::new(
+                    atom_id,
+                    Presence::Present,
+                    Some(descriptor),
+                    TimeAxis::Regular(segment),
+                    None,
+                )),
+                Some((clock_id, rate)),
+            )
+        } else {
+            (
+                Atom::Tensor(Tensor::new(
+                    atom_id,
+                    Presence::Present,
+                    Some(descriptor),
+                    vec![
+                        SemanticAxis::new(concept("abir:axis/channel")?, channels),
+                        SemanticAxis::new(concept("abir:axis/sample")?, samples),
+                    ],
+                )),
+                None,
+            )
+        };
+
+        let mut recording = Recording::new(recording_id, vec![stream_id]);
+        recording.add_source_key(
+            SourceKey::new("legacy-lma-entry-sha256", &entry.sha256)
+                .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?,
+        );
+        draft.add_recording(recording);
+        draft.add_stream(Stream::new(
+            stream_id,
+            recording_id,
+            modality_concept(None),
+            vec![atom_id],
+            stream_clock.map(|(id, _)| id),
+            None,
+            None,
+        ));
+        draft.add_atom(atom);
+        if let Some((id, rate)) = stream_clock {
+            draft.add_clock(Clock::new(
+                id,
+                concept("abir:clock/device")?,
+                None,
+                Rational::new(0, 1).expect("zero rational is valid"),
+                rate,
+                Rational::new(0, 1).expect("zero uncertainty is valid"),
+            ));
+        }
+        draft.add_fidelity(Fidelity::new(
+            SemanticRef::of(atom_id),
+            FidelityKind::Exact,
+            None,
+            None,
+        ));
+
+        payloads.push((format!("payload-{index:04}.i64le"), payload));
+        signal_entries += 1;
+        total_channels = total_channels
+            .checked_add(channels)
+            .ok_or(LegacyError::DecodedTooLarge)?;
+        total_samples = total_samples
+            .checked_add(samples)
+            .ok_or(LegacyError::DecodedTooLarge)?;
+    }
+
+    if signal_entries == 0 {
+        return Err(LegacyError::MalformedContainer(
+            "LMA archive contains no LML entry to import semantically".to_owned(),
+        ));
+    }
+
+    draft.add_source_capsule(SourceCapsule::new(
+        SourceKey::new("legacy-source-blake3", &source_blake3)
+            .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?,
+        source_content_id,
+        Some(legacy_media_type(format)),
+    ));
+    let limits = ValidationLimits {
+        max_logical_payload_bytes: max_decoded_bytes,
+        ..ValidationLimits::default()
+    };
+    let dataset = draft
+        .validate(limits)
+        .map_err(|report| LegacyError::SemanticValidation(format!("{report:?}")))?;
+    let dataset_json = canonical_debug_json(&dataset)
+        .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?;
+    let dataset_content_id = logical_content_id(&dataset)
+        .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?;
+
+    let mapping = MappingReport {
+        source_profile: ProfileId(format.profile().to_owned()),
+        target_profile: ProfileId("abir.semantic-v1".to_owned()),
+        semantic_coverage: SemanticCoverage::ProjectedSemantic,
+        entries: vec![
+            MappingEntry {
+                source_path: "archive.lml-entries".to_owned(),
+                target: "abir.dataset.recordings".to_owned(),
+                disposition: MappingDisposition::Exact,
+                reason: None,
+            },
+            MappingEntry {
+                source_path: "archive.entry.sample-rate".to_owned(),
+                target: "abir.stream.atom.time-axis".to_owned(),
+                disposition: if timing_known {
+                    MappingDisposition::Exact
+                } else {
+                    MappingDisposition::Unsupported
+                },
+                reason: (!timing_known).then(|| {
+                    "at least one archive entry carries no exact positive sample rate".to_owned()
+                }),
+            },
+            MappingEntry {
+                source_path: "archive.non-signal-entries".to_owned(),
+                target: "abir.source-capsule".to_owned(),
+                disposition: MappingDisposition::Quarantined,
+                reason: Some(
+                    "stored and zstd entries are preserved byte-exact and are never promoted to recordings"
+                        .to_owned(),
+                ),
+            },
+        ],
+        preserved_unknowns: sibling_entries,
+        sample_values_changed: false,
+        timing_changed: false,
+    };
+    let mapping_report = serde_json::to_vec_pretty(&mapping)
+        .map_err(|error| LegacyError::InvalidProtocol(error.to_string()))?;
+    let fidelity = SemanticFidelityReport {
+        schema: "lamquant.legacy-fidelity/v1".to_owned(),
+        source_profile: format.profile().to_owned(),
+        exact_source_restoration: true,
+        exact_sample_values: true,
+        sample_values_changed: false,
+        timing_equivalence: timing_known,
+        modality_equivalence: false,
+        semantic_equivalence: false,
+        source_capsule_file: SOURCE_FILE.to_owned(),
+        caveats: vec![
+            format!(
+                "archive holds {signal_entries} LML recording(s) and {sibling_entries} \
+                 non-signal entr(y/ies); the flat receipt counts are archive-wide sums, \
+                 not one recording's shape"
+            ),
+            "non-signal entries stay byte-exact in the source capsule and are never \
+             promoted to recordings"
+                .to_owned(),
+            "legacy archive metadata remains quarantined in the exact source capsule".to_owned(),
+        ],
+    };
+    let fidelity_report = serde_json::to_vec_pretty(&fidelity)
+        .map_err(|error| LegacyError::InvalidProtocol(error.to_string()))?;
+    let receipt = SemanticImportReceipt {
+        profile: format.profile().to_owned(),
+        source_blake3,
+        source_bytes: source.len() as u64,
+        decoded_channels: total_channels,
+        decoded_samples_per_channel: total_samples,
+        decoded_payload_bytes: total_payload_bytes,
+        dataset_content_id: dataset_content_id.to_string(),
+        payload_content_id: first_payload_id.ok_or_else(|| {
+            LegacyError::MalformedContainer("archive produced no payload".to_owned())
+        })?,
+        source_preserved: true,
+        exact_sample_values: true,
+        exact_source_restoration: true,
+        semantic_equivalence: false,
+        timing: if timing_known {
+            "regular".to_owned()
+        } else {
+            "unknown-at-source".to_owned()
+        },
+        modality: "legacy:modality/unknown-at-source".to_owned(),
+        semantic_coverage: "projected-semantic".to_owned(),
+    };
+    let semantic_receipt = serde_json::to_vec_pretty(&receipt)
+        .map_err(|error| LegacyError::InvalidProtocol(error.to_string()))?;
+    Ok(SemanticArtifacts {
+        receipt,
+        dataset_json,
+        payloads,
+        mapping_report,
+        fidelity_report,
+        semantic_receipt,
+    })
+}
+
 fn build_lqtp1_artifacts(
     source: &[u8],
     max_decoded_bytes: u64,
@@ -1223,8 +1559,7 @@ fn build_lqtp1_artifacts(
     Ok(SemanticArtifacts {
         receipt,
         dataset_json,
-        payload_file: LQTP1_PAYLOAD_FILE,
-        payload,
+        payloads: vec![(LQTP1_PAYLOAD_FILE.to_owned(), payload)],
         mapping_report,
         fidelity_report,
         semantic_receipt,
@@ -1422,8 +1757,7 @@ fn build_semantic_artifacts(
     Ok(SemanticArtifacts {
         receipt,
         dataset_json,
-        payload_file: PAYLOAD_FILE,
-        payload,
+        payloads: vec![(PAYLOAD_FILE.to_owned(), payload)],
         mapping_report,
         fidelity_report,
         semantic_receipt,
@@ -1533,14 +1867,22 @@ fn verify_existing_semantic(
     expected_source: &[u8],
     expected: &SemanticArtifacts,
 ) -> Result<SemanticImportReceipt, LegacyError> {
-    let expected_files: &[(&str, &[u8])] = &[
+    let mut expected_files: Vec<(&str, &[u8])> = vec![
         (SOURCE_FILE, expected_source),
         (DATASET_FILE, &expected.dataset_json),
-        (expected.payload_file, &expected.payload),
         (MAPPING_REPORT_FILE, &expected.mapping_report),
         (FIDELITY_REPORT_FILE, &expected.fidelity_report),
         (SEMANTIC_RECEIPT_FILE, &expected.semantic_receipt),
     ];
+    // Every recording payload must match too, so a destination that dropped or
+    // rewrote one entry of a multi-recording archive is still a conflict.
+    expected_files.extend(
+        expected
+            .payloads
+            .iter()
+            .map(|(name, bytes)| (name.as_str(), bytes.as_slice())),
+    );
+    let expected_files = expected_files;
     for (name, expected_bytes) in expected_files {
         let actual =
             fs::read(destination.join(name)).map_err(|_| LegacyError::DestinationConflict)?;

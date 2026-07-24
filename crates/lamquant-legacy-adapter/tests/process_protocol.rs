@@ -570,7 +570,10 @@ fn unsupported_profile_does_not_overstate_semantic_import() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("input.lma");
     let output = temp.path().join("semantic");
-    fs::write(&source, b"LMA1payload").unwrap();
+    // Both LMA generations now import semantically, so this fixture must use a
+    // profile that is still genuinely unsupported for the assertion to mean
+    // anything.
+    fs::write(&source, b"LMQCpayload").unwrap();
     let error = import_semantic(&SemanticImportRequest {
         source,
         destination: output.clone(),
@@ -594,7 +597,7 @@ fn unsupported_profile_does_not_overstate_semantic_import() {
         !manifest
             .capabilities
             .iter()
-            .find(|value| value.profile == "legacy.lma.v1")
+            .find(|value| value.profile == "legacy.lmqc.v1")
             .unwrap()
             .semantic_import
     );
@@ -645,6 +648,15 @@ fn committed_converter_matrix_scopes_semantic_claims_per_profile() {
     );
     assert_eq!(
         matrix["semantic_profiles"]["legacy.lma.v1"]["status"],
+        "PASS_PROJECTED"
+    );
+    // LMA v1 imports semantically but cannot yet re-emit, so it must NOT carry
+    // a reverse_export claim.
+    assert!(matrix["semantic_profiles"]["legacy.lma.v1"]
+        .get("reverse_export")
+        .is_none());
+    assert_eq!(
+        matrix["semantic_profiles"]["legacy.lmqc.v1"]["status"],
         "NOT_CLAIMED"
     );
     assert_eq!(
@@ -673,4 +685,65 @@ fn source_symlink_is_rejected_without_output() {
     .unwrap_err();
     assert_eq!(error, LegacyError::UnsafeSource);
     assert!(!output.exists());
+}
+
+#[test]
+fn lma_v1_semantic_import_emits_one_recording_per_archived_signal() {
+    // A real LMA v1 archive: two synthetic EDFs, which the packer encodes as
+    // `Method::Lml` entries, plus one non-signal sibling that must NOT become a
+    // recording.
+    let temp = tempfile::tempdir().unwrap();
+    let input = temp.path().join("tree");
+    fs::create_dir(&input).unwrap();
+    let samples: Vec<i16> = (0..256).map(|value| (value % 97) as i16).collect();
+    for name in ["a.edf", "b.edf"] {
+        fs::write(
+            input.join(name),
+            lamquant_lml_archive::ingest::edf_synth::synth_single_channel_edf(&samples, 256.0),
+        )
+        .unwrap();
+    }
+    fs::write(input.join("notes.txt"), b"clinical sidecar, not a signal").unwrap();
+
+    let archive = temp.path().join("input.lma");
+    lamquant_lml_archive::lma::pack_archive(&input, &archive, 3, false, None).unwrap();
+    // `pack_archive` emits the v2 streaming layout; the same reader resolves
+    // v1, so both generations share the importer.
+    assert!(fs::read(&archive).unwrap().starts_with(b"LMA2"));
+
+    let output = temp.path().join("semantic");
+    let receipt = import_semantic(&SemanticImportRequest {
+        source: archive,
+        destination: output.clone(),
+        accept_fidelity: true,
+        max_source_bytes: 1 << 20,
+        max_decoded_bytes: 1 << 20,
+    })
+    .unwrap();
+
+    assert_eq!(receipt.profile, "legacy.lma.v2");
+    // Two signals in, two recordings out — the archive is never flattened.
+    assert_eq!(receipt.decoded_channels, 2);
+    assert!(receipt.exact_source_restoration);
+    assert!(!receipt.semantic_equivalence);
+    assert_eq!(receipt.semantic_coverage, "projected-semantic");
+
+    // One payload file per archived signal, and none for the text sibling.
+    let payloads = fs::read_dir(&output)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("payload-"))
+        .count();
+    assert_eq!(payloads, 2);
+
+    let dataset: serde_json::Value =
+        serde_json::from_slice(&fs::read(output.join("dataset.json")).unwrap()).unwrap();
+    let text = dataset.to_string();
+    // Both archived signals must survive as distinct recordings, each bound to
+    // its own archive-entry digest.
+    assert!(
+        text.matches("legacy-lma-entry-sha256").count() >= 2,
+        "dataset did not carry one source key per archived signal"
+    );
+    assert!(fs::read(output.join("source.bin")).is_ok());
 }

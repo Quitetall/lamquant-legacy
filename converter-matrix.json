@@ -1,9 +1,15 @@
 {
   "schema": "lamquant.legacy-converter-matrix/v1",
   "profiles": [
-    "legacy.bcs1.v1", "legacy.lml1.v1", "legacy.lma.v1", "legacy.lma.v2",
-    "legacy.lmqc.v1", "legacy.lmlcrypt.v1", "legacy.lqtp.v1",
-    "legacy.lqtp.v2", "legacy.lqtp.v3"
+    "legacy.bcs1.v1",
+    "legacy.lml1.v1",
+    "legacy.lma.v1",
+    "legacy.lma.v2",
+    "legacy.lmqc.v1",
+    "legacy.lmlcrypt.v1",
+    "legacy.lqtp.v1",
+    "legacy.lqtp.v2",
+    "legacy.lqtp.v3"
   ],
   "forensic_import": "PASS",
   "semantic_import": "PARTIAL",
@@ -23,10 +29,26 @@
       "modality": "UNKNOWN_AT_SOURCE",
       "reverse_export": "PASS_PROJECTED_EXACT_SAMPLES"
     },
-    "legacy.lma.v1": {"status": "NOT_CLAIMED"},
-    "legacy.lma.v2": {"status": "NOT_CLAIMED"},
-    "legacy.lmqc.v1": {"status": "NOT_CLAIMED"},
-    "legacy.lmlcrypt.v1": {"status": "NOT_CLAIMED"},
+    "legacy.lma.v1": {
+      "status": "PASS_PROJECTED",
+      "sample_values": "EXACT",
+      "source_capsule": "EXACT",
+      "metadata": "QUARANTINED",
+      "modality": "UNKNOWN_AT_SOURCE"
+    },
+    "legacy.lma.v2": {
+      "status": "PASS_PROJECTED",
+      "sample_values": "EXACT",
+      "source_capsule": "EXACT",
+      "metadata": "QUARANTINED",
+      "modality": "UNKNOWN_AT_SOURCE"
+    },
+    "legacy.lmqc.v1": {
+      "status": "NOT_CLAIMED"
+    },
+    "legacy.lmlcrypt.v1": {
+      "status": "NOT_CLAIMED"
+    },
     "legacy.lqtp.v1": {
       "status": "PASS_PROJECTED",
       "decoded_window_values": "EXACT",
@@ -36,8 +58,12 @@
       "row_identity": "EXTERNAL_MANIFEST_HASH_ONLY",
       "reverse_export": "PASS_EXACT_SOURCE_CAPSULE"
     },
-    "legacy.lqtp.v2": {"status": "NOT_CLAIMED"},
-    "legacy.lqtp.v3": {"status": "NOT_CLAIMED"}
+    "legacy.lqtp.v2": {
+      "status": "NOT_CLAIMED"
+    },
+    "legacy.lqtp.v3": {
+      "status": "NOT_CLAIMED"
+    }
   },
   "reverse_export": "PARTIAL",
   "source_overwrite": false
