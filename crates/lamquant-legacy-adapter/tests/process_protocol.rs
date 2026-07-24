@@ -1077,3 +1077,32 @@ fn lmlcrypt_import_anchors_the_dataset_to_the_ciphertext_and_needs_the_key() {
 fn blake3_hex(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }
+
+#[test]
+fn archive_with_a_broken_integrity_trailer_is_refused_before_output() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut bytes = lma_v1_archive(
+        &lml1_source_from_bcs1(&bcs1_source()),
+        ("annotations.tse", b"0.0 1.0 bckg 1.0000\n"),
+    );
+    // Flip one bit of the archive's own SHA-256 trailer. The codec's reader
+    // opens by seeking and never checks it; the adapter holds the whole blob
+    // and must, or the corruption would be carried into ABIR semantics.
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    let source = temp.path().join("corrupt.lma");
+    fs::write(&source, &bytes).unwrap();
+
+    let output = temp.path().join("semantic");
+    let error = import_semantic(&SemanticImportRequest {
+        source: source.clone(),
+        destination: output.clone(),
+        accept_fidelity: true,
+        max_source_bytes: 1 << 20,
+        max_decoded_bytes: 1 << 20,
+    })
+    .unwrap_err();
+    assert!(matches!(error, LegacyError::MalformedContainer(_)));
+    assert!(!output.exists());
+    assert!(inspect(&source, 1 << 20).is_err());
+}

@@ -220,7 +220,41 @@ fn lma_v2_archive(entries: &[(String, Vec<u8>)], sidecar: (&str, &[u8])) -> Vec<
     archive
 }
 
-/// Every corruption a retired archive can arrive with. Each must be refused
+/// The LMQC neural container: a real montage plus an opaque encoded latent.
+fn lmqc_container() -> Vec<u8> {
+    lamquant_lml_mcu::lmqc::encode_lmqc(
+        2,
+        32,
+        79,
+        250,
+        2500,
+        lamquant_lml_mcu::lmqc::PAYLOAD_FP16_LATENT,
+        Some(&[0.1, 0.2, 0.3, -0.1, -0.2, -0.3]),
+        Some(&["Fp1".to_owned(), "Fp2".to_owned()]),
+        b"opaque encoded latent bytes",
+    )
+    .expect("fixture montage encodes")
+}
+
+/// A fixed AEAD key for the envelope fixture. It protects nothing real: the
+/// plaintext is a synthetic five-sample recording built in this file.
+const FIXTURE_KEY: [u8; 32] = [0x2b; 32];
+
+fn seal(plaintext: &[u8], nonce: &[u8; 12]) -> Vec<u8> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    let cipher = aes_gcm::Aes256Gcm::new_from_slice(&FIXTURE_KEY).expect("32-byte key");
+    let ciphertext = cipher
+        .encrypt(aes_gcm::Nonce::from_slice(nonce), plaintext)
+        .expect("fixture plaintext seals");
+    let mut blob = Vec::new();
+    blob.extend_from_slice(b"LMLCRYPT");
+    blob.push(1);
+    blob.extend_from_slice(nonce);
+    blob.extend_from_slice(&ciphertext);
+    blob
+}
+
+/// Every corruption a retired container can arrive with. Each must be refused
 /// before any output is produced.
 fn malformed_variants(valid: &[u8]) -> Vec<(String, Vec<u8>)> {
     let mut cases = Vec::new();
@@ -239,10 +273,17 @@ fn malformed_variants(valid: &[u8]) -> Vec<(String, Vec<u8>)> {
     cases.push(("header-only".to_owned(), short));
 
     let mut flipped = valid.to_vec();
-    // Corrupt one manifest byte: the manifest must not silently drop entries.
+    // Corrupt one interior byte. For an archive the manifest must not silently
+    // drop entries; for a CRC- or AEAD-protected container the integrity check
+    // must fire rather than the corruption being carried into the dataset.
     let target = flipped.len() / 3;
     flipped[target] ^= 0xff;
-    cases.push(("manifest-bit-flip".to_owned(), flipped));
+    cases.push(("interior-bit-flip".to_owned(), flipped));
+
+    let mut tail = valid.to_vec();
+    let last = tail.len() - 1;
+    tail[last] ^= 0xff;
+    cases.push(("trailing-integrity-flip".to_owned(), tail));
 
     cases
 }
@@ -262,6 +303,14 @@ fn build_lma_v2() -> Vec<u8> {
     lma_v2_archive(&archive_entries(), SIDECAR)
 }
 
+fn build_lmqc() -> Vec<u8> {
+    lmqc_container()
+}
+
+fn build_lmlcrypt() -> Vec<u8> {
+    seal(&archive_entries().remove(0).1, &[7; 12])
+}
+
 const PROFILES: &[Profile] = &[
     Profile {
         id: "legacy.lma.v1",
@@ -270,6 +319,14 @@ const PROFILES: &[Profile] = &[
     Profile {
         id: "legacy.lma.v2",
         build: build_lma_v2,
+    },
+    Profile {
+        id: "legacy.lmqc.v1",
+        build: build_lmqc,
+    },
+    Profile {
+        id: "legacy.lmlcrypt.v1",
+        build: build_lmlcrypt,
     },
 ];
 
@@ -466,10 +523,29 @@ fn measure(profile: &Profile, role: &str) -> BTreeMap<String, Assertion> {
             // The importer must refuse rather than overwrite the evidence
             // already there, and must leave both sources untouched.
             let other_entries = vec![archive_entries().remove(1)];
-            let other = if profile.id == "legacy.lma.v1" {
-                lma_v1_archive(&other_entries, SIDECAR)
-            } else {
-                lma_v2_archive(&other_entries, SIDECAR)
+            let other = match profile.id {
+                "legacy.lma.v1" => lma_v1_archive(&other_entries, SIDECAR),
+                "legacy.lma.v2" => lma_v2_archive(&other_entries, SIDECAR),
+                // A different latent yields a different container.
+                "legacy.lmqc.v1" => {
+                    let mut altered = lmqc_container();
+                    let position = altered.len() - 8;
+                    altered[position] ^= 0x01;
+                    lamquant_lml_mcu::lmqc::encode_lmqc(
+                        2,
+                        32,
+                        79,
+                        250,
+                        2500,
+                        lamquant_lml_mcu::lmqc::PAYLOAD_FP16_LATENT,
+                        Some(&[0.1, 0.2, 0.3, -0.1, -0.2, -0.3]),
+                        Some(&["Fp1".to_owned(), "Fp2".to_owned()]),
+                        b"a different encoded latent",
+                    )
+                    .expect("second fixture encodes")
+                }
+                // A different nonce over a different plaintext.
+                _ => seal(&other_entries[0].1, &[9; 12]),
             };
             let other_path = stage(root, "other.legacy", &other);
             let error = import(&other_path, &destination)
@@ -511,6 +587,18 @@ fn main() {
     }
 
     let selected = profile(&profile_id);
+    if selected.id == "legacy.lmlcrypt.v1" {
+        // The envelope profile reads its key from the documented environment
+        // variable. Set the fixture key here so the receipt measures the
+        // adapter, not the operator's shell.
+        std::env::set_var(
+            "LAMQUANT_KEY",
+            FIXTURE_KEY
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+        );
+    }
     let assertions = measure(selected, &role);
     let receipt = Receipt {
         assertions,

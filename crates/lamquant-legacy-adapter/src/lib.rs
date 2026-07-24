@@ -457,10 +457,34 @@ fn inspect_shape(
     }
 }
 
+/// Verify the 32-byte SHA-256 trailer both archive generations append.
+///
+/// The codec's reader deliberately does NOT check it: it opens archives by
+/// seeking, and hashing a multi-hundred-gigabyte corpus on every open would be
+/// ruinous. This adapter already holds the whole blob in memory under
+/// `max_source_bytes`, so it can afford the check -- and a retired archive
+/// whose own integrity trailer disagrees with its bytes must be refused, not
+/// imported with the corruption carried into ABIR semantics.
+fn verify_archive_digest(source: &[u8]) -> Result<(), LegacyError> {
+    use sha2::Digest;
+
+    let split = source.len().checked_sub(32).ok_or_else(|| {
+        LegacyError::MalformedContainer("archive has no digest trailer".to_owned())
+    })?;
+    let (body, recorded) = source.split_at(split);
+    if sha2::Sha256::digest(body).as_slice() != recorded {
+        return Err(LegacyError::MalformedContainer(
+            "archive SHA-256 trailer does not match its bytes".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// Archive-wide sums over the signal entries, read from each entry's header.
 fn inspect_archive_shape(bytes: &[u8]) -> Result<(u64, u64, u64), LegacyError> {
     use lamquant_lml_archive::lma;
 
+    verify_archive_digest(bytes)?;
     let mut temporary = tempfile::NamedTempFile::new().map_err(io_error)?;
     temporary.write_all(bytes).map_err(io_error)?;
     temporary.flush().map_err(io_error)?;
@@ -1787,6 +1811,7 @@ fn build_lma_artifacts(
 ) -> Result<SemanticArtifacts, LegacyError> {
     use lamquant_lml_archive::lma;
 
+    verify_archive_digest(source)?;
     // The archive readers are path-based; stage the in-memory source once.
     let mut temporary = tempfile::NamedTempFile::new().map_err(io_error)?;
     temporary.write_all(source).map_err(io_error)?;
