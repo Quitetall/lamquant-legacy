@@ -10,6 +10,15 @@ source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=1c377f2afe8
 [[package]]
 name = "abir"
 version = "0.1.0"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=23608e9f4e8112333882c4db49d92211e4898743#23608e9f4e8112333882c4db49d92211e4898743"
+dependencies = [
+ "blake3",
+ "serde_json",
+]
+
+[[package]]
+name = "abir"
+version = "0.1.0"
 source = "git+https://github.com/Quitetall/ABIR.git?rev=5fb448361e762f5ae17f9b760be16f40632cd1f3#5fb448361e762f5ae17f9b760be16f40632cd1f3"
 dependencies = [
  "blake3",
@@ -220,7 +229,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 name = "lamquant-abir-bridge"
 version = "0.1.0"
 dependencies = [
- "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=5fb448361e762f5ae17f9b760be16f40632cd1f3)",
+ "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=23608e9f4e8112333882c4db49d92211e4898743)",
  "blake3",
  "bytemuck",
  "lamquant-legacy-ir",
