@@ -21,14 +21,14 @@
       "inspect": true,
       "forensic_import": true,
       "semantic_import": true,
-      "reverse_export": false
+      "reverse_export": true
     },
     {
       "profile": "legacy.lma.v2",
       "inspect": true,
       "forensic_import": true,
       "semantic_import": true,
-      "reverse_export": false
+      "reverse_export": true
     },
     {
       "profile": "legacy.lmqc.v1",

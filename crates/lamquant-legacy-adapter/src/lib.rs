@@ -65,7 +65,10 @@ impl LegacyFormat {
     }
 
     pub const fn supports_reverse_export(self) -> bool {
-        matches!(self, Self::Bcs1 | Self::Lml1 | Self::Lqtp1)
+        matches!(
+            self,
+            Self::Bcs1 | Self::Lml1 | Self::Lqtp1 | Self::Lma1 | Self::Lma2
+        )
     }
 }
 
@@ -542,6 +545,9 @@ pub fn export_semantic(
     if request.format == LegacyFormat::Lqtp1 {
         return export_lqtp1_exact(request, &dataset);
     }
+    if matches!(request.format, LegacyFormat::Lma1 | LegacyFormat::Lma2) {
+        return export_lma_archive(request, &dataset);
+    }
     let (signal, sample_rate, modality_tag) =
         resolve_export_signal(&dataset, &request.payloads, request.max_payload_bytes)?;
     let window_size =
@@ -618,6 +624,104 @@ pub fn export_semantic(
         std::mem::forget(temporary);
     }
     result
+}
+
+/// Re-emit a multi-recording dataset as an LMA archive, one LML entry per
+/// recording.
+///
+/// The archive writer always produces the v2 layout, so the receipt reports
+/// `legacy.lma.v2` whatever generation was requested: claiming an exact v1
+/// re-emission would assert a wire this function does not write. Sample values
+/// are verified exact by decoding every entry back out of the finished archive.
+fn export_lma_archive(
+    request: &SemanticExportRequest,
+    dataset: &abir::AbirDataset,
+) -> Result<SemanticExportReceipt, LegacyError> {
+    let signals = resolve_export_signals(dataset, &request.payloads, request.max_payload_bytes)?;
+    let window_size =
+        usize::try_from(request.window_size).map_err(|_| LegacyError::SemanticExportUnsupported)?;
+    if window_size == 0 {
+        return Err(LegacyError::SemanticExportUnsupported);
+    }
+    let scratch = tempfile::tempdir().map_err(io_error)?;
+    let mut encoded: Vec<(String, Vec<u8>)> = Vec::with_capacity(signals.len());
+    for (index, (signal, sample_rate, _modality)) in signals.iter().enumerate() {
+        let lml_path = scratch.path().join(format!("recording-{index:04}.lml"));
+        lamquant_lml_legacy::container::write_file(
+            &lml_path,
+            signal,
+            *sample_rate,
+            window_size,
+            0,
+            "{}",
+        )
+        .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+        let bytes = read_bounded(&lml_path, request.max_output_bytes)?;
+        encoded.push((format!("recording-{index:04}.lml"), bytes));
+    }
+    let borrowed: Vec<(&str, &[u8])> = encoded
+        .iter()
+        .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+        .collect();
+    let archive_path = scratch.path().join("archive.lma");
+    lamquant_lml_archive::lma::pack_lml_entries(&borrowed, &archive_path, 3)
+        .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+    let output = read_bounded(&archive_path, request.max_output_bytes)?;
+    if u64::try_from(output.len()).map_err(|_| LegacyError::SourceTooLarge)?
+        > request.max_output_bytes
+    {
+        return Err(LegacyError::SourceTooLarge);
+    }
+
+    // Verify from the finished archive, not from the buffers we just wrote, so
+    // a framing bug cannot pass unnoticed.
+    let written = lamquant_lml_archive::lma::list_archive(&archive_path)
+        .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+    if written.len() != signals.len() {
+        return Err(LegacyError::MalformedContainer(
+            "re-emitted archive entry count does not match the dataset".to_owned(),
+        ));
+    }
+    let mut total_channels = 0_u64;
+    let mut total_samples = 0_u64;
+    for (entry, (signal, _rate, _modality)) in written.iter().zip(signals.iter()) {
+        let stored = lamquant_lml_archive::lma::read_entry(&archive_path, &entry.path)
+            .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+        let decoded = lamquant_lml_legacy::container::read_bytes(&stored)
+            .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?
+            .0;
+        if &decoded != signal {
+            return Err(LegacyError::MalformedContainer(
+                "reverse-export verification changed sample values".to_owned(),
+            ));
+        }
+        total_channels = total_channels
+            .checked_add(signal.len() as u64)
+            .ok_or(LegacyError::DecodedTooLarge)?;
+        total_samples = total_samples
+            .checked_add(signal.first().map_or(0, Vec::len) as u64)
+            .ok_or(LegacyError::DecodedTooLarge)?;
+    }
+
+    let destination = &request.destination;
+    if destination.exists() {
+        return Err(LegacyError::DestinationConflict);
+    }
+    write_new(destination, &output)?;
+    Ok(SemanticExportReceipt {
+        // The writer emits v2; report what was actually produced.
+        profile: LegacyFormat::Lma2.profile().to_owned(),
+        dataset_content_id: logical_content_id(dataset)
+            .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?
+            .to_string(),
+        output_blake3: blake3::hash(&output).to_hex().to_string(),
+        output_bytes: output.len() as u64,
+        decoded_channels: total_channels,
+        decoded_samples_per_channel: total_samples,
+        exact_sample_values: true,
+        semantic_equivalence: false,
+        accepted_projection: true,
+    })
 }
 
 fn export_lqtp1_exact(

@@ -34,14 +34,16 @@
       "sample_values": "EXACT",
       "source_capsule": "EXACT",
       "metadata": "QUARANTINED",
-      "modality": "UNKNOWN_AT_SOURCE"
+      "modality": "UNKNOWN_AT_SOURCE",
+      "reverse_export": "PASS_PROJECTED_EXACT_SAMPLES_AS_V2"
     },
     "legacy.lma.v2": {
       "status": "PASS_PROJECTED",
       "sample_values": "EXACT",
       "source_capsule": "EXACT",
       "metadata": "QUARANTINED",
-      "modality": "UNKNOWN_AT_SOURCE"
+      "modality": "UNKNOWN_AT_SOURCE",
+      "reverse_export": "PASS_PROJECTED_EXACT_SAMPLES_AS_V2"
     },
     "legacy.lmqc.v1": {
       "status": "NOT_CLAIMED"

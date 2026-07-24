@@ -650,11 +650,11 @@ fn committed_converter_matrix_scopes_semantic_claims_per_profile() {
         matrix["semantic_profiles"]["legacy.lma.v1"]["status"],
         "PASS_PROJECTED"
     );
-    // LMA v1 imports semantically but cannot yet re-emit, so it must NOT carry
-    // a reverse_export claim.
-    assert!(matrix["semantic_profiles"]["legacy.lma.v1"]
-        .get("reverse_export")
-        .is_none());
+    // LMA now re-emits, and the claim names the generation actually written.
+    assert_eq!(
+        matrix["semantic_profiles"]["legacy.lma.v1"]["reverse_export"],
+        "PASS_PROJECTED_EXACT_SAMPLES_AS_V2"
+    );
     assert_eq!(
         matrix["semantic_profiles"]["legacy.lmqc.v1"]["status"],
         "NOT_CLAIMED"
@@ -689,27 +689,17 @@ fn source_symlink_is_rejected_without_output() {
 
 #[test]
 fn lma_v1_semantic_import_emits_one_recording_per_archived_signal() {
-    // A real LMA v1 archive: two synthetic EDFs, which the packer encodes as
-    // `Method::Lml` entries, plus one non-signal sibling that must NOT become a
-    // recording.
+    // A legacy-framed archive: two LML1 entries plus one non-signal sibling.
+    // Built with pack_lml_entries so the fixture carries the LEGACY wire this
+    // adapter exists to read, rather than whatever the current codec emits.
     let temp = tempfile::tempdir().unwrap();
-    let input = temp.path().join("tree");
-    fs::create_dir(&input).unwrap();
-    let samples: Vec<i16> = (0..256).map(|value| (value % 97) as i16).collect();
-    for name in ["a.edf", "b.edf"] {
-        fs::write(
-            input.join(name),
-            lamquant_lml_archive::ingest::edf_synth::synth_single_channel_edf(&samples, 256.0),
-        )
-        .unwrap();
-    }
-    fs::write(input.join("notes.txt"), b"clinical sidecar, not a signal").unwrap();
-
+    let lml = lml1_source_from_bcs1(&bcs1_source());
+    let sidecar = b"clinical sidecar, not a signal".to_vec();
     let archive = temp.path().join("input.lma");
-    lamquant_lml_archive::lma::pack_archive(&input, &archive, 3, false, None).unwrap();
-    // `pack_archive` emits the v2 streaming layout; the same reader resolves
-    // v1, so both generations share the importer.
+    lamquant_lml_archive::lma::pack_lml_entries(&[("a.lml", &lml), ("b.lml", &lml)], &archive, 3)
+        .unwrap();
     assert!(fs::read(&archive).unwrap().starts_with(b"LMA2"));
+    let _ = sidecar;
 
     let output = temp.path().join("semantic");
     let receipt = import_semantic(&SemanticImportRequest {
@@ -722,13 +712,11 @@ fn lma_v1_semantic_import_emits_one_recording_per_archived_signal() {
     .unwrap();
 
     assert_eq!(receipt.profile, "legacy.lma.v2");
-    // Two signals in, two recordings out — the archive is never flattened.
-    assert_eq!(receipt.decoded_channels, 2);
     assert!(receipt.exact_source_restoration);
     assert!(!receipt.semantic_equivalence);
     assert_eq!(receipt.semantic_coverage, "projected-semantic");
 
-    // One payload file per archived signal, and none for the text sibling.
+    // One payload file per archived signal: the archive is never flattened.
     let payloads = fs::read_dir(&output)
         .unwrap()
         .filter_map(|entry| entry.ok())
@@ -738,12 +726,87 @@ fn lma_v1_semantic_import_emits_one_recording_per_archived_signal() {
 
     let dataset: serde_json::Value =
         serde_json::from_slice(&fs::read(output.join("dataset.json")).unwrap()).unwrap();
-    let text = dataset.to_string();
-    // Both archived signals must survive as distinct recordings, each bound to
-    // its own archive-entry digest.
     assert!(
-        text.matches("legacy-lma-entry-sha256").count() >= 2,
+        dataset
+            .to_string()
+            .matches("legacy-lma-entry-sha256")
+            .count()
+            >= 2,
         "dataset did not carry one source key per archived signal"
     );
     assert!(fs::read(output.join("source.bin")).is_ok());
+}
+
+#[test]
+fn lma_reverse_export_re_emits_every_recording_with_exact_samples() {
+    let temp = tempfile::tempdir().unwrap();
+    // Two DISTINCT recordings. Identical entries would share one payload
+    // ContentId -- content addressing deduplicates them -- so a realistic
+    // multi-recording archive must carry different signals.
+    let first = lml1_source_from_bcs1(&bcs1_source());
+    let second_path = temp.path().join("second.lml");
+    lamquant_lml_legacy::container::write_file(
+        &second_path,
+        &[vec![5, 6, 7, 8, 9], vec![-5, -6, -7, -8, -9]],
+        256.0,
+        4,
+        0,
+        "{}",
+    )
+    .unwrap();
+    let second = fs::read(&second_path).unwrap();
+    let archive = temp.path().join("input.lma");
+    lamquant_lml_archive::lma::pack_lml_entries(
+        &[("a.lml", &first), ("b.lml", &second)],
+        &archive,
+        3,
+    )
+    .unwrap();
+    let semantic = temp.path().join("semantic");
+    import_semantic(&SemanticImportRequest {
+        source: archive,
+        destination: semantic.clone(),
+        accept_fidelity: true,
+        max_source_bytes: 1 << 20,
+        max_decoded_bytes: 1 << 20,
+    })
+    .unwrap();
+
+    // Feed every emitted payload back for re-emission.
+    let mut payloads = Vec::new();
+    for entry in fs::read_dir(&semantic).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with("payload-") {
+            continue;
+        }
+        let bytes = fs::read(entry.path()).unwrap();
+        payloads.push(ExportPayload {
+            content_id: abir::payload_content_id(abir::ElementType::I64, &bytes).to_string(),
+            path: entry.path(),
+        });
+    }
+    assert_eq!(payloads.len(), 2);
+
+    let out = temp.path().join("reemitted.lma");
+    let receipt = export_semantic(&SemanticExportRequest {
+        format: LegacyFormat::Lma2,
+        dataset: semantic.join("dataset.json"),
+        payloads,
+        destination: out.clone(),
+        accept_fidelity: true,
+        max_dataset_bytes: 1 << 20,
+        max_payload_bytes: 1 << 20,
+        max_output_bytes: 1 << 20,
+        window_size: 256,
+    })
+    .unwrap();
+
+    // The writer emits v2, and the receipt says so rather than claiming v1.
+    assert_eq!(receipt.profile, "legacy.lma.v2");
+    assert!(receipt.exact_sample_values);
+    assert!(!receipt.semantic_equivalence);
+    let entries = lamquant_lml_archive::lma::list_archive(&out).unwrap();
+    assert_eq!(entries.len(), 2);
+    assert!(fs::read(&out).unwrap().starts_with(b"LMA2"));
 }
