@@ -1,0 +1,10 @@
+{
+  "case_id": "1ch_100",
+  "channels": 1,
+  "desktop_sha256": "aeacda4c3b675cc58118810063009f5b84f421da951375bcbfa2f6da206df5b6",
+  "encoded_bytes": 178,
+  "firmware_sha256": "aeacda4c3b675cc58118810063009f5b84f421da951375bcbfa2f6da206df5b6",
+  "samples": 100,
+  "schema": "lamquant.adr0139.compute-byte-equality-receipt/v1",
+  "status": "pass"
+}

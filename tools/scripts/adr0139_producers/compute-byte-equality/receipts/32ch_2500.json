@@ -1,0 +1,10 @@
+{
+  "case_id": "32ch_2500",
+  "channels": 32,
+  "desktop_sha256": "1e92724c7c9d522f8b342c52b54227010d0f758bff602023a0600cfe9d25cc1c",
+  "encoded_bytes": 84604,
+  "firmware_sha256": "1e92724c7c9d522f8b342c52b54227010d0f758bff602023a0600cfe9d25cc1c",
+  "samples": 2500,
+  "schema": "lamquant.adr0139.compute-byte-equality-receipt/v1",
+  "status": "pass"
+}
