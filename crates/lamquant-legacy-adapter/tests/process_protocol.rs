@@ -1,6 +1,6 @@
 use lamquant_legacy_adapter::{
     capability_manifest, convert_forensic, detect_format, export_semantic, import_semantic,
-    ConvertRequest, ExportPayload, LegacyError, LegacyFormat, SemanticExportRequest,
+    inspect, ConvertRequest, ExportPayload, LegacyError, LegacyFormat, SemanticExportRequest,
     SemanticImportRequest,
 };
 use lamquant_legacy_ir::{Bcs1Header, BCS1_VERSION_MAJOR, BCS1_VERSION_MINOR, CODEC_LML_53};
@@ -58,6 +58,26 @@ fn lml1_source_from_bcs1(bcs1: &[u8]) -> Vec<u8> {
     bytes
 }
 
+fn lqtp1_source(path: &std::path::Path) -> Vec<u8> {
+    let mut writer = lamquant_lml_archive::tensor_pack::PackWriter::create(
+        path,
+        lamquant_lml_archive::tensor_pack::PackDtype::F32,
+        2,
+        3,
+        2,
+        [0x5a; 32],
+    )
+    .unwrap();
+    writer
+        .write_window(&[1.0, -2.0, 3.0, 4.0, -5.0, 6.0])
+        .unwrap();
+    writer
+        .write_window(&[7.0, -8.0, 9.0, 10.0, -11.0, 12.0])
+        .unwrap();
+    writer.finish().unwrap();
+    fs::read(path).unwrap()
+}
+
 #[test]
 fn every_retired_magic_has_a_stable_profile() {
     let cases: &[(&[u8], LegacyFormat)] = &[
@@ -78,26 +98,38 @@ fn every_retired_magic_has_a_stable_profile() {
 
 #[test]
 fn forensic_conversion_is_exact_non_destructive_and_idempotent() {
-    let temp = tempfile::tempdir().unwrap();
-    let source = temp.path().join("input.lml");
-    let output = temp.path().join("output");
-    let original = b"LML1\x01\x02\x03";
-    fs::write(&source, original).unwrap();
+    for (name, original) in [
+        ("bcs1", b"BCS1payload".as_slice()),
+        ("lml1", b"LML1payload".as_slice()),
+        ("lqtp1", b"LQTP\x01payload".as_slice()),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join(format!("input-{name}"));
+        let output = temp.path().join("output");
+        fs::write(&source, original).unwrap();
 
-    let request = ConvertRequest {
-        source: source.clone(),
-        destination: output.clone(),
-        accept_fidelity: true,
-        max_source_bytes: 1024,
-    };
-    let first = convert_forensic(&request).unwrap();
-    let second = convert_forensic(&request).unwrap();
+        let request = ConvertRequest {
+            source: source.clone(),
+            destination: output.clone(),
+            accept_fidelity: true,
+            max_source_bytes: 1024,
+        };
+        let first = convert_forensic(&request).unwrap();
+        let second = convert_forensic(&request).unwrap();
 
-    assert_eq!(fs::read(&source).unwrap(), original);
-    assert_eq!(fs::read(output.join("source.bin")).unwrap(), original);
-    assert_eq!(first, second);
-    assert!(first.source_preserved);
-    assert!(!first.semantic_mapping_claimed);
+        assert_eq!(fs::read(&source).unwrap(), original);
+        assert_eq!(fs::read(output.join("source.bin")).unwrap(), original);
+        assert_eq!(first, second);
+        assert!(first.source_preserved);
+        assert!(!first.semantic_mapping_claimed);
+
+        fs::write(output.join("source.bin"), b"conflict").unwrap();
+        assert_eq!(
+            convert_forensic(&request),
+            Err(LegacyError::DestinationConflict)
+        );
+        assert_eq!(fs::read(&source).unwrap(), original);
+    }
 }
 
 #[test]
@@ -386,6 +418,136 @@ fn semantic_reverse_export_fails_before_output_on_acceptance_bounds_or_identity(
 }
 
 #[test]
+fn lqtp1_semantic_import_and_exact_reverse_export_are_bounded_and_non_destructive() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("input.lqtp");
+    let original = lqtp1_source(&source);
+    let output = temp.path().join("semantic");
+    let inspection = inspect(&source, 1024 * 1024).unwrap();
+    assert_eq!(inspection.profile, "legacy.lqtp.v1");
+    assert_eq!(inspection.decoded_channels, Some(2));
+    assert_eq!(inspection.decoded_samples_per_channel, Some(6));
+
+    let imported = import_semantic(&SemanticImportRequest {
+        source: source.clone(),
+        destination: output.clone(),
+        accept_fidelity: true,
+        max_source_bytes: 1024 * 1024,
+        max_decoded_bytes: 1024 * 1024,
+    })
+    .unwrap();
+    assert_eq!(imported.profile, "legacy.lqtp.v1");
+    assert_eq!(imported.decoded_channels, 2);
+    assert_eq!(imported.decoded_samples_per_channel, 6);
+    assert_eq!(imported.decoded_payload_bytes, 48);
+    assert!(imported.exact_sample_values);
+    assert!(imported.exact_source_restoration);
+    assert!(!imported.semantic_equivalence);
+    assert_eq!(fs::read(&source).unwrap(), original);
+    assert_eq!(fs::read(output.join("source.bin")).unwrap(), original);
+    assert_eq!(fs::read(output.join("payload.f32le")).unwrap().len(), 48);
+    assert!(!output.join("payload.i64le").exists());
+
+    let canonical = fs::read(output.join("dataset.json")).unwrap();
+    let dataset = abir::parse_canonical_dataset(&canonical).unwrap();
+    let tensor = &dataset.atoms()[0];
+    assert_eq!(tensor.payload().unwrap().element(), abir::ElementType::F32);
+    assert_eq!(tensor.payload().unwrap().shape(), &[2, 2, 3]);
+    let mapping: serde_json::Value =
+        serde_json::from_slice(&fs::read(output.join("mapping-report.json")).unwrap()).unwrap();
+    assert_eq!(mapping["sample_values_changed"], false);
+    assert_eq!(mapping["preserved_unknowns"], 1);
+    let fidelity: serde_json::Value =
+        serde_json::from_slice(&fs::read(output.join("fidelity-report.json")).unwrap()).unwrap();
+    assert_eq!(fidelity["exact_source_restoration"], true);
+    assert_eq!(fidelity["semantic_equivalence"], false);
+
+    let capsule = &dataset.source_capsules()[0];
+    let export_dir = temp.path().join("export");
+    let export = SemanticExportRequest {
+        format: LegacyFormat::Lqtp1,
+        dataset: output.join("dataset.json"),
+        payloads: vec![ExportPayload {
+            content_id: capsule.content_id().to_string(),
+            path: output.join("source.bin"),
+        }],
+        destination: export_dir.clone(),
+        accept_fidelity: true,
+        max_dataset_bytes: 1024 * 1024,
+        max_payload_bytes: 1024 * 1024,
+        max_output_bytes: 1024 * 1024,
+        window_size: 0,
+    };
+    let first = export_semantic(&export).unwrap();
+    let second = export_semantic(&export).unwrap();
+    assert_eq!(first, second);
+    assert!(first.exact_sample_values);
+    assert!(!first.semantic_equivalence);
+    assert!(first.accepted_projection);
+    assert_eq!(
+        fs::read(export_dir.join("legacy-output.bin")).unwrap(),
+        original
+    );
+
+    fs::write(export_dir.join("legacy-output.bin"), b"conflict").unwrap();
+    assert_eq!(
+        export_semantic(&export),
+        Err(LegacyError::DestinationConflict)
+    );
+    assert_eq!(fs::read(&source).unwrap(), original);
+}
+
+#[test]
+fn lqtp1_rejects_malformed_or_over_budget_input_before_output() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("input.lqtp");
+    let mut bytes = lqtp1_source(&source);
+    bytes[5] = 0xff;
+    fs::write(&source, bytes).unwrap();
+    assert!(matches!(
+        inspect(&source, 1024 * 1024),
+        Err(LegacyError::MalformedContainer(_))
+    ));
+    let valid = temp.path().join("valid.lqtp");
+    lqtp1_source(&valid);
+    assert!(matches!(
+        import_semantic(&SemanticImportRequest {
+            source: valid,
+            destination: temp.path().join("out"),
+            accept_fidelity: true,
+            max_source_bytes: 1024 * 1024,
+            max_decoded_bytes: 4,
+        }),
+        Err(LegacyError::DecodedTooLarge)
+    ));
+    assert!(!temp.path().join("out").exists());
+
+    let oversized = temp.path().join("oversized.lqtp");
+    let mut hostile_header = vec![0_u8; 64];
+    hostile_header[0..4].copy_from_slice(b"LQTP");
+    hostile_header[4] = 1;
+    hostile_header[5] = 3;
+    hostile_header[6..8].copy_from_slice(&u16::MAX.to_le_bytes());
+    hostile_header[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+    hostile_header[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+    let stride = usize::from(u16::MAX)
+        .checked_mul(4)
+        .and_then(|scales| {
+            usize::from(u16::MAX)
+                .checked_mul(u32::MAX as usize)
+                .and_then(|values| values.checked_mul(4))
+                .and_then(|mantissas| scales.checked_add(mantissas))
+        })
+        .unwrap();
+    hostile_header[16..24].copy_from_slice(&(stride as u64).to_le_bytes());
+    fs::write(&oversized, hostile_header).unwrap();
+    assert_eq!(
+        inspect(&oversized, 1024 * 1024),
+        Err(LegacyError::DecodedTooLarge)
+    );
+}
+
+#[test]
 fn semantic_import_bounds_decoded_allocation_before_output() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("input.bcs1");
@@ -484,6 +646,10 @@ fn committed_converter_matrix_scopes_semantic_claims_per_profile() {
     assert_eq!(
         matrix["semantic_profiles"]["legacy.lma.v1"]["status"],
         "NOT_CLAIMED"
+    );
+    assert_eq!(
+        matrix["semantic_profiles"]["legacy.lqtp.v1"]["status"],
+        "PASS_PROJECTED"
     );
 }
 

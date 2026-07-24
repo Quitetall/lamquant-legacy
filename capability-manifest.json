@@ -8,7 +8,7 @@
     {"profile":"legacy.lma.v2","inspect":true,"forensic_import":true,"semantic_import":false,"reverse_export":false},
     {"profile":"legacy.lmqc.v1","inspect":true,"forensic_import":true,"semantic_import":false,"reverse_export":false},
     {"profile":"legacy.lmlcrypt.v1","inspect":true,"forensic_import":true,"semantic_import":false,"reverse_export":false},
-    {"profile":"legacy.lqtp.v1","inspect":true,"forensic_import":true,"semantic_import":false,"reverse_export":false},
+    {"profile":"legacy.lqtp.v1","inspect":true,"forensic_import":true,"semantic_import":true,"reverse_export":true},
     {"profile":"legacy.lqtp.v2","inspect":true,"forensic_import":true,"semantic_import":false,"reverse_export":false},
     {"profile":"legacy.lqtp.v3","inspect":true,"forensic_import":true,"semantic_import":false,"reverse_export":false}
   ]

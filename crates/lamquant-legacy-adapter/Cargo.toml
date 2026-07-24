@@ -13,6 +13,7 @@ abir-adapter.workspace = true
 blake3.workspace = true
 lamquant-legacy-ir.workspace = true
 lamquant-lml-legacy.workspace = true
+lamquant-lml-archive.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

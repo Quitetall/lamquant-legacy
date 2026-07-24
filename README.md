@@ -5,10 +5,10 @@ repository is not a library dependency of ABIR, BLUT, firmware, training, or
 the main LamQuant runtime.
 
 The adapter provides bounded inspection and exact, non-destructive forensic
-conversion for every retired profile. BCS1 and LML1 containers additionally
+conversion for every retired profile. BCS1, LML1, and LQTP1 additionally
 support a bounded `import-semantic` process operation. That operation decodes
-integer samples, constructs and validates a current `AbirDataset`, writes its
-canonical JSON and content-addressed `i64` payload, and retains the complete
+stored values, constructs and validates a current `AbirDataset`, writes its
+canonical JSON and content-addressed payload, and retains the complete
 source as an exact capsule. It also writes explicit mapping and fidelity
 reports. Unversioned legacy metadata is quarantined, so the resulting coverage
 is honestly reported as `projected-semantic`, not full semantic equivalence.
@@ -19,6 +19,13 @@ uniform-rate signed integer signal blocks, and writes an atomically committed
 legacy wire plus receipt. The process decodes its own output and compares every
 sample before commit. The receipt claims exact sample values, not full semantic
 equivalence; callers must explicitly accept that projection.
+
+LQTP1 import validates the complete fixed-stride pack, dequantizes every BFP
+window into a `[window, channel, sample]` `f32` tensor, and retains the ordered
+manifest SHA-256 as an exact source key. The pack contains neither row
+identities nor a sampling clock or modality, so those meanings remain explicit
+projection gaps. LQTP1 export restores a hash-bound source capsule exactly and
+rejects missing or changed capsule bytes before writing.
 
 The process accepts one JSON request on stdin and returns one JSON response on
 stdout. A semantic request has this shape:
