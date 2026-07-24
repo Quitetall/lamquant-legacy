@@ -22,6 +22,10 @@ const SOURCE_FILE: &str = "source.bin";
 const DATASET_FILE: &str = "dataset.json";
 const PAYLOAD_FILE: &str = "payload.i64le";
 const LQTP1_PAYLOAD_FILE: &str = "payload.f32le";
+const LMQC_PAYLOAD_FILE: &str = "payload.lmqc-latent";
+/// Environment variable the retired `lml encrypt`/`lml decrypt` pair documented
+/// as the scripted key source: 64 hexadecimal characters = 32 raw bytes.
+const KEY_ENV: &str = "LAMQUANT_KEY";
 const MAPPING_REPORT_FILE: &str = "mapping-report.json";
 const FIDELITY_REPORT_FILE: &str = "fidelity-report.json";
 const SEMANTIC_RECEIPT_FILE: &str = "semantic-receipt.json";
@@ -60,21 +64,32 @@ impl LegacyFormat {
     pub const fn supports_semantic_import(self) -> bool {
         matches!(
             self,
-            Self::Bcs1 | Self::Lml1 | Self::Lqtp1 | Self::Lma1 | Self::Lma2
+            Self::Bcs1
+                | Self::Lml1
+                | Self::Lqtp1
+                | Self::Lma1
+                | Self::Lma2
+                | Self::Lmqc
+                | Self::Lmlcrypt
         )
     }
 
     pub const fn supports_reverse_export(self) -> bool {
         matches!(
             self,
-            Self::Bcs1 | Self::Lml1 | Self::Lqtp1 | Self::Lma1 | Self::Lma2
+            Self::Bcs1
+                | Self::Lml1
+                | Self::Lqtp1
+                | Self::Lma1
+                | Self::Lma2
+                | Self::Lmqc
+                | Self::Lmlcrypt
         )
     }
 }
 
 #[derive(Clone, Debug)]
 struct ContainerFacts {
-    format: LegacyFormat,
     channels: u64,
     samples_per_channel: u64,
     decoded_payload_bytes: u64,
@@ -250,6 +265,9 @@ pub enum LegacyError {
     AcceptanceRequired,
     SemanticImportUnsupported,
     SemanticExportUnsupported,
+    /// The AEAD key an encrypted retired blob needs is absent or malformed.
+    /// A capability gap, not a broken file.
+    KeyUnavailable,
     DecodedTooLarge,
     PayloadIdentityMismatch,
     MalformedContainer(String),
@@ -268,6 +286,7 @@ impl LegacyError {
             Self::AcceptanceRequired => "acceptance-required",
             Self::SemanticImportUnsupported => "semantic-import-unsupported",
             Self::SemanticExportUnsupported => "semantic-export-unsupported",
+            Self::KeyUnavailable => "key-unavailable",
             Self::DecodedTooLarge => "decoded-output-too-large",
             Self::PayloadIdentityMismatch => "payload-identity-mismatch",
             Self::MalformedContainer(_) => "malformed-container",
@@ -293,6 +312,9 @@ impl fmt::Display for LegacyError {
             ),
             Self::SemanticExportUnsupported => formatter.write_str(
                 "current ABIR semantics cannot be represented by the requested retired profile",
+            ),
+            Self::KeyUnavailable => formatter.write_str(
+                "encrypted retired blob needs a 64-hex-character LAMQUANT_KEY in the environment",
             ),
             Self::DecodedTooLarge => {
                 formatter.write_str("decoded signal exceeds declared byte limit")
@@ -382,37 +404,103 @@ pub fn capability_manifest() -> CapabilityManifest {
     }
 }
 
+/// The shape a retired container declares in its own headers: channels,
+/// samples per channel, decoded payload bytes.
+///
+/// Header-only by construction — inspection must not decode a whole recording
+/// to answer "what is this". `None` means the wire genuinely cannot say without
+/// more than inspection has: a sealed AEAD envelope needs its key, and asking
+/// inspect for a key would make simply listing a directory a privileged act.
+fn inspect_shape(
+    bytes: &[u8],
+    format: LegacyFormat,
+) -> Result<Option<(u64, u64, u64)>, LegacyError> {
+    match format {
+        LegacyFormat::Lqtp1 => {
+            let header = parse_lqtp1_header(bytes)?;
+            let samples = header
+                .n_windows
+                .checked_mul(header.window_len)
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or(LegacyError::DecodedTooLarge)?;
+            let channels =
+                u64::try_from(header.n_channels).map_err(|_| LegacyError::DecodedTooLarge)?;
+            let payload_bytes = channels
+                .checked_mul(samples)
+                .and_then(|value| value.checked_mul(4))
+                .ok_or(LegacyError::DecodedTooLarge)?;
+            Ok(Some((channels, samples, payload_bytes)))
+        }
+        LegacyFormat::Lmqc => {
+            let container = lamquant_lml_mcu::lmqc::decode_lmqc(bytes)
+                .map_err(|error| LegacyError::MalformedContainer(format!("{error:?}")))?;
+            Ok(Some((
+                u64::from(container.n_channels),
+                u64::from(container.window_samples),
+                u64::try_from(container.payload.len()).map_err(|_| LegacyError::DecodedTooLarge)?,
+            )))
+        }
+        LegacyFormat::Lma1 | LegacyFormat::Lma2 => {
+            let (channels, samples, payload_bytes) = inspect_archive_shape(bytes)?;
+            Ok(Some((channels, samples, payload_bytes)))
+        }
+        LegacyFormat::Bcs1 | LegacyFormat::Lml1 => {
+            let facts = inspect_container(bytes, format, u64::MAX)?;
+            Ok(Some((
+                facts.channels,
+                facts.samples_per_channel,
+                facts.decoded_payload_bytes,
+            )))
+        }
+        LegacyFormat::Lmlcrypt => Ok(None),
+        _ => Ok(None),
+    }
+}
+
+/// Archive-wide sums over the signal entries, read from each entry's header.
+fn inspect_archive_shape(bytes: &[u8]) -> Result<(u64, u64, u64), LegacyError> {
+    use lamquant_lml_archive::lma;
+
+    let mut temporary = tempfile::NamedTempFile::new().map_err(io_error)?;
+    temporary.write_all(bytes).map_err(io_error)?;
+    temporary.flush().map_err(io_error)?;
+    let path = temporary.path();
+    let entries = lma::list_archive(path)
+        .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+    let (mut channels, mut samples, mut payload_bytes) = (0_u64, 0_u64, 0_u64);
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.method == lma::Method::Lml)
+    {
+        let stored = lma::read_entry(path, &entry.path)
+            .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+        let encoded = decode_source(&stored, detect_format(&stored)?)?.into_owned();
+        let header = lamquant_lml_legacy::container::parse_header(&encoded)
+            .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+        let entry_channels =
+            u64::try_from(header.n_ch).map_err(|_| LegacyError::DecodedTooLarge)?;
+        let entry_samples =
+            u64::try_from(header.total_samples).map_err(|_| LegacyError::DecodedTooLarge)?;
+        channels = channels
+            .checked_add(entry_channels)
+            .ok_or(LegacyError::DecodedTooLarge)?;
+        samples = samples
+            .checked_add(entry_samples)
+            .ok_or(LegacyError::DecodedTooLarge)?;
+        payload_bytes = entry_channels
+            .checked_mul(entry_samples)
+            .and_then(|value| value.checked_mul(8))
+            .and_then(|value| payload_bytes.checked_add(value))
+            .ok_or(LegacyError::DecodedTooLarge)?;
+    }
+    Ok((channels, samples, payload_bytes))
+}
+
 pub fn inspect(source: &Path, max_source_bytes: u64) -> Result<Inspection, LegacyError> {
     let bytes = read_bounded(source, max_source_bytes)?;
     let format = detect_format(&bytes)?;
-    if format == LegacyFormat::Lqtp1 {
-        let header = parse_lqtp1_header(&bytes)?;
-        let decoded_payload_bytes = header
-            .n_windows
-            .checked_mul(header.n_channels)
-            .and_then(|value| value.checked_mul(header.window_len))
-            .and_then(|value| value.checked_mul(4))
-            .and_then(|value| u64::try_from(value).ok())
-            .ok_or(LegacyError::DecodedTooLarge)?;
-        return Ok(Inspection {
-            profile: format.profile().to_owned(),
-            source_bytes: bytes.len() as u64,
-            source_blake3: blake3::hash(&bytes).to_hex().to_string(),
-            semantic_conversion: true,
-            forensic_conversion: true,
-            decoded_channels: Some(header.n_channels as u64),
-            decoded_samples_per_channel: Some(
-                header
-                    .n_windows
-                    .checked_mul(header.window_len)
-                    .and_then(|value| u64::try_from(value).ok())
-                    .ok_or(LegacyError::DecodedTooLarge)?,
-            ),
-            decoded_payload_bytes: Some(decoded_payload_bytes),
-        });
-    }
-    let facts = if format.supports_semantic_import() {
-        Some(inspect_container(&bytes, format, u64::MAX)?)
+    let shape = if format.supports_semantic_import() {
+        inspect_shape(&bytes, format)?
     } else {
         None
     };
@@ -422,9 +510,9 @@ pub fn inspect(source: &Path, max_source_bytes: u64) -> Result<Inspection, Legac
         source_blake3: blake3::hash(&bytes).to_hex().to_string(),
         semantic_conversion: format.supports_semantic_import(),
         forensic_conversion: true,
-        decoded_channels: facts.as_ref().map(|value| value.channels),
-        decoded_samples_per_channel: facts.as_ref().map(|value| value.samples_per_channel),
-        decoded_payload_bytes: facts.as_ref().map(|value| value.decoded_payload_bytes),
+        decoded_channels: shape.map(|(channels, _, _)| channels),
+        decoded_samples_per_channel: shape.map(|(_, samples, _)| samples),
+        decoded_payload_bytes: shape.map(|(_, _, bytes)| bytes),
     })
 }
 
@@ -479,21 +567,18 @@ pub fn import_semantic(
     if !format.supports_semantic_import() {
         return Err(LegacyError::SemanticImportUnsupported);
     }
-    let artifacts = if format == LegacyFormat::Lqtp1 {
-        build_lqtp1_artifacts(&source, request.max_decoded_bytes)?
-    } else if matches!(format, LegacyFormat::Lma1 | LegacyFormat::Lma2) {
-        // An archive is a directory tree, not one LML stream, so it cannot go
-        // through the single-container decode path below. The archive reader
-        // resolves either generation's layout, so v1 and v2 share this path.
-        build_lma_artifacts(&source, request.max_decoded_bytes, format)?
+    let artifacts = if format == LegacyFormat::Lmlcrypt {
+        // The envelope carries no semantics of its own. Open it, then import
+        // whatever container it protected, anchored to the CIPHERTEXT so the
+        // dataset names the bytes that are actually on disk.
+        let (plaintext, envelope) = open_lmlcrypt(&source)?;
+        build_artifacts(&plaintext, &envelope, request.max_decoded_bytes)?
     } else {
-        let facts = inspect_container(&source, format, request.max_decoded_bytes)?;
-        let decode_source = decode_source(&source, format)?;
-        let signal = lamquant_lml_legacy::container::read_bytes(&decode_source)
-            .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?
-            .0;
-        verify_decoded_shape(&signal, &facts)?;
-        build_semantic_artifacts(&source, &facts, signal, request.max_decoded_bytes)?
+        build_artifacts(
+            &source,
+            &SourceAnchor::direct(&source, format),
+            request.max_decoded_bytes,
+        )?
     };
 
     if request.destination.exists() {
@@ -550,8 +635,15 @@ pub fn export_semantic(
             "dataset input is not canonical ABIR JSON".to_owned(),
         ));
     }
-    if request.format == LegacyFormat::Lqtp1 {
-        return export_lqtp1_exact(request, &dataset);
+    // Three retired profiles re-emit from the exact source capsule: a tensor
+    // pack and a neural container hold no sample-domain semantics this adapter
+    // could re-encode, and an AEAD envelope cannot be rebuilt without its key.
+    // Capsule-exact re-emission is byte-identical and invents nothing.
+    if matches!(
+        request.format,
+        LegacyFormat::Lqtp1 | LegacyFormat::Lmqc | LegacyFormat::Lmlcrypt
+    ) {
+        return export_capsule_exact(request, &dataset);
     }
     if matches!(request.format, LegacyFormat::Lma1 | LegacyFormat::Lma2) {
         return export_lma_archive(request, &dataset);
@@ -732,7 +824,13 @@ fn export_lma_archive(
     })
 }
 
-fn export_lqtp1_exact(
+/// Re-emit the exact retired source held in the dataset's source capsule.
+///
+/// The capsule's media type decides which wire this is, so a capsule of the
+/// wrong generation cannot be re-emitted under another profile's name. The
+/// bytes are verified against the capsule ContentId AND re-parsed as the
+/// requested wire before anything is written.
+fn export_capsule_exact(
     request: &SemanticExportRequest,
     dataset: &abir::AbirDataset,
 ) -> Result<SemanticExportReceipt, LegacyError> {
@@ -740,7 +838,7 @@ fn export_lqtp1_exact(
         return Err(LegacyError::SemanticExportUnsupported);
     }
     let capsule = &dataset.source_capsules()[0];
-    if capsule.media_type() != Some(legacy_media_type(LegacyFormat::Lqtp1)) {
+    if capsule.media_type() != Some(legacy_media_type(request.format)) {
         return Err(LegacyError::SemanticExportUnsupported);
     }
     let capsule_id = capsule.content_id().to_string();
@@ -757,7 +855,7 @@ fn export_lqtp1_exact(
         != 1
     {
         return Err(LegacyError::InvalidProtocol(
-            "duplicate LQTP1 source-capsule payload".to_owned(),
+            "duplicate retired source-capsule payload".to_owned(),
         ));
     }
     let output = read_bounded(
@@ -767,20 +865,24 @@ fn export_lqtp1_exact(
     if payload_content_id(ElementType::Bytes, &output) != capsule.content_id() {
         return Err(LegacyError::PayloadIdentityMismatch);
     }
-    let header = parse_lqtp1_header(&output)?;
+    // Re-parse as the requested wire: matching the capsule ContentId proves
+    // the bytes are unchanged, not that they are the format being claimed.
+    if detect_format(&output)? != request.format {
+        return Err(LegacyError::SemanticExportUnsupported);
+    }
+    let (channels, samples) =
+        capsule_exact_shape(&output, request.format, request.max_payload_bytes)?;
     let receipt = SemanticExportReceipt {
-        profile: LegacyFormat::Lqtp1.profile().to_owned(),
+        profile: request.format.profile().to_owned(),
         dataset_content_id: logical_content_id(dataset)
             .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?
             .to_string(),
         output_blake3: blake3::hash(&output).to_hex().to_string(),
         output_bytes: output.len() as u64,
-        decoded_channels: header.n_channels as u64,
-        decoded_samples_per_channel: header
-            .n_windows
-            .checked_mul(header.window_len)
-            .and_then(|value| u64::try_from(value).ok())
-            .ok_or(LegacyError::DecodedTooLarge)?,
+        decoded_channels: channels,
+        decoded_samples_per_channel: samples,
+        // The retired bytes are reproduced exactly; for LMQC and LMLCRYPT the
+        // sample domain was never entered, so nothing there was altered either.
         exact_sample_values: true,
         semantic_equivalence: false,
         accepted_projection: true,
@@ -809,6 +911,34 @@ fn export_lqtp1_exact(
         std::mem::forget(temporary);
     }
     result
+}
+
+/// Channels and samples-per-channel a capsule-exact re-emission describes.
+///
+/// Derived by importing the bytes about to be written, so the export receipt
+/// reports the same shape the import receipt did, by construction rather than
+/// by a second implementation that could drift from it. An LMLCRYPT envelope is
+/// opened first, so an export without the key fails closed rather than
+/// reporting a made-up shape.
+fn capsule_exact_shape(
+    output: &[u8],
+    format: LegacyFormat,
+    max_decoded_bytes: u64,
+) -> Result<(u64, u64), LegacyError> {
+    let artifacts = if format == LegacyFormat::Lmlcrypt {
+        let (plaintext, envelope) = open_lmlcrypt(output)?;
+        build_artifacts(&plaintext, &envelope, max_decoded_bytes)?
+    } else {
+        build_artifacts(
+            output,
+            &SourceAnchor::direct(output, format),
+            max_decoded_bytes,
+        )?
+    };
+    Ok((
+        artifacts.receipt.decoded_channels,
+        artifacts.receipt.decoded_samples_per_channel,
+    ))
 }
 
 /// One decoded recording: per-channel samples, sample rate in Hz, modality tag.
@@ -1152,13 +1282,413 @@ fn inspect_container(
         .or_else(|| sample_rate_millihz(bytes, format, &header.metadata));
     let modality_tag = bcs1_header.map(|value| value.modality_tag);
     Ok(ContainerFacts {
-        format,
         channels,
         samples_per_channel,
         decoded_payload_bytes,
         sample_rate_millihz,
         modality_tag,
         metadata: header.metadata,
+    })
+}
+
+/// The bytes an imported dataset is anchored to, and how to describe them.
+///
+/// For a bare retired container the anchor IS the container. For an LMLCRYPT
+/// blob it is the ciphertext: the file on disk is the envelope, so the source
+/// capsule -- and every identity derived from it -- must be the envelope, or
+/// the dataset would claim to have come from bytes nobody holds. The extra
+/// mapping entries, caveats and source keys let the envelope state its own
+/// contribution inside the inner container's reports rather than beside them.
+struct SourceAnchor<'a> {
+    bytes: &'a [u8],
+    format: LegacyFormat,
+    extra_mapping: Vec<MappingEntry>,
+    extra_caveats: Vec<String>,
+    extra_source_keys: Vec<(String, String)>,
+}
+
+impl<'a> SourceAnchor<'a> {
+    /// The container is its own anchor: nothing wraps it.
+    fn direct(bytes: &'a [u8], format: LegacyFormat) -> Self {
+        Self {
+            bytes,
+            format,
+            extra_mapping: Vec::new(),
+            extra_caveats: Vec::new(),
+            extra_source_keys: Vec::new(),
+        }
+    }
+
+    fn source_keys(&self) -> Result<Vec<SourceKey>, LegacyError> {
+        self.extra_source_keys
+            .iter()
+            .map(|(namespace, value)| {
+                SourceKey::new(namespace, value)
+                    .map_err(|error| LegacyError::SemanticValidation(error.to_string()))
+            })
+            .collect()
+    }
+}
+
+/// Route one retired container to its builder. `source` is the container being
+/// parsed; `anchor` is what the resulting dataset claims to have come from.
+fn build_artifacts(
+    source: &[u8],
+    anchor: &SourceAnchor<'_>,
+    max_decoded_bytes: u64,
+) -> Result<SemanticArtifacts, LegacyError> {
+    let format = detect_format(source)?;
+    match format {
+        LegacyFormat::Lqtp1 => build_lqtp1_artifacts(source, anchor, max_decoded_bytes),
+        LegacyFormat::Lmqc => build_lmqc_artifacts(source, anchor, max_decoded_bytes),
+        // An archive is a directory tree, not one LML stream, so it cannot go
+        // through the single-container decode path. The archive reader resolves
+        // either generation's layout, so v1 and v2 share this path.
+        LegacyFormat::Lma1 | LegacyFormat::Lma2 => {
+            build_lma_artifacts(source, anchor, max_decoded_bytes)
+        }
+        LegacyFormat::Bcs1 | LegacyFormat::Lml1 => {
+            let facts = inspect_container(source, format, max_decoded_bytes)?;
+            let decoded = decode_source(source, format)?;
+            let signal = lamquant_lml_legacy::container::read_bytes(&decoded)
+                .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?
+                .0;
+            verify_decoded_shape(&signal, &facts)?;
+            build_semantic_artifacts(anchor, &facts, signal, max_decoded_bytes)
+        }
+        _ => Err(LegacyError::SemanticImportUnsupported),
+    }
+}
+
+/// The 32-byte AEAD key, from the environment variable the retired
+/// `lml encrypt`/`lml decrypt` pair documented.
+///
+/// Absence is a capability gap, not a malformed file: it gets its own error so
+/// a caller can tell "you need to provide the key" from "this blob is broken".
+fn lmlcrypt_key() -> Result<[u8; 32], LegacyError> {
+    let hex = std::env::var(KEY_ENV).map_err(|_| LegacyError::KeyUnavailable)?;
+    if hex.len() != 64 {
+        return Err(LegacyError::KeyUnavailable);
+    }
+    let mut key = [0_u8; 32];
+    for (index, byte) in key.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16)
+            .map_err(|_| LegacyError::KeyUnavailable)?;
+    }
+    Ok(key)
+}
+
+/// Authenticate and open an LMLCRYPT blob.
+///
+/// Returns the plaintext plus the anchor that re-attributes the imported
+/// dataset to the envelope: the file on disk is the ciphertext, so that is what
+/// the source capsule and every derived identity must name. A nested envelope
+/// is refused rather than unwrapped, so one import can never be made to peel an
+/// unbounded chain.
+fn open_lmlcrypt(source: &[u8]) -> Result<(Vec<u8>, SourceAnchor<'_>), LegacyError> {
+    use aes_gcm::aead::{Aead, KeyInit};
+
+    const HEADER_LEN: usize = 8 + 1 + 12;
+    if source.len() < HEADER_LEN + 16 {
+        return Err(LegacyError::MalformedContainer(
+            "LMLCRYPT blob is shorter than its header plus authentication tag".to_owned(),
+        ));
+    }
+    if source[8] != 1 {
+        return Err(LegacyError::MalformedContainer(format!(
+            "unsupported LMLCRYPT version {}",
+            source[8]
+        )));
+    }
+    let nonce = &source[9..HEADER_LEN];
+    let key = lmlcrypt_key()?;
+    let cipher = aes_gcm::Aes256Gcm::new_from_slice(&key)
+        .map_err(|_| LegacyError::MalformedContainer("AEAD key is not 32 bytes".to_owned()))?;
+    let plaintext = cipher
+        .decrypt(aes_gcm::Nonce::from_slice(nonce), &source[HEADER_LEN..])
+        .map_err(|_| {
+            // A tag mismatch means the wrong key OR a tampered blob. Both are
+            // refusals; neither says which, because saying which is an oracle.
+            LegacyError::MalformedContainer(
+                "LMLCRYPT authentication failed: wrong key or altered ciphertext".to_owned(),
+            )
+        })?;
+    let inner = detect_format(&plaintext)?;
+    if inner == LegacyFormat::Lmlcrypt {
+        return Err(LegacyError::MalformedContainer(
+            "LMLCRYPT envelope contains another envelope".to_owned(),
+        ));
+    }
+    let nonce_hex = nonce
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let anchor = SourceAnchor {
+        bytes: source,
+        format: LegacyFormat::Lmlcrypt,
+        extra_mapping: vec![MappingEntry {
+            source_path: "envelope.aead".to_owned(),
+            target: "abir.source-capsule".to_owned(),
+            disposition: MappingDisposition::Quarantined,
+            reason: Some(
+                "the AES-256-GCM envelope authenticated the payload; the nonce and version are \
+                 recorded, the key never enters the dataset"
+                    .to_owned(),
+            ),
+        }],
+        extra_caveats: vec![format!(
+            "source bytes are an AES-256-GCM envelope over a {} container; the semantics below \
+             are the container's, and reading them again requires the same key",
+            inner.profile()
+        )],
+        extra_source_keys: vec![
+            ("lmlcrypt.version".to_owned(), source[8].to_string()),
+            ("lmlcrypt.nonce".to_owned(), nonce_hex),
+            (
+                "lmlcrypt.inner-profile".to_owned(),
+                inner.profile().to_owned(),
+            ),
+        ],
+    };
+    Ok((plaintext, anchor))
+}
+
+/// Import an LMQC neural container.
+///
+/// The payload is an ENCODED latent: decoding it back to samples needs the
+/// neural decoder and its weights, which this adapter does not carry. So the
+/// atom is an `EncodedBlock` whose `DecodedSemantics` states the shape the
+/// payload decodes to, and the payload file holds the encoded bytes verbatim.
+/// The montage the container exists to carry -- channel count, electrode
+/// coordinates, channel names, sampling rate -- IS recovered exactly; claiming
+/// sample values would be inventing them.
+fn build_lmqc_artifacts(
+    source: &[u8],
+    anchor: &SourceAnchor<'_>,
+    max_decoded_bytes: u64,
+) -> Result<SemanticArtifacts, LegacyError> {
+    let container = lamquant_lml_mcu::lmqc::decode_lmqc(source)
+        .map_err(|error| LegacyError::MalformedContainer(format!("{error:?}")))?;
+    let payload = container.payload.clone();
+    let payload_bytes = u64::try_from(payload.len()).map_err(|_| LegacyError::DecodedTooLarge)?;
+    if payload_bytes > max_decoded_bytes {
+        return Err(LegacyError::DecodedTooLarge);
+    }
+    let channels = u64::from(container.n_channels);
+    let window_samples = u64::from(container.window_samples);
+    if channels == 0 || window_samples == 0 {
+        return Err(LegacyError::MalformedContainer(
+            "LMQC declares an empty montage or window".to_owned(),
+        ));
+    }
+
+    let source_hash = blake3::hash(anchor.bytes);
+    let source_blake3 = source_hash.to_hex().to_string();
+    let payload_id = payload_content_id(ElementType::Bytes, &payload);
+    let source_content_id = payload_content_id(ElementType::Bytes, anchor.bytes);
+    let dataset_id = derive_id::<DatasetTag>(source_hash.as_bytes(), b"dataset");
+    let recording_id = derive_id::<RecordingTag>(source_hash.as_bytes(), b"recording");
+    let stream_id = derive_id::<StreamTag>(source_hash.as_bytes(), b"stream");
+    let atom_id = derive_id::<AtomTag>(source_hash.as_bytes(), b"latent");
+    let clock_id = derive_id::<ClockTag>(source_hash.as_bytes(), b"clock");
+
+    let descriptor = PayloadDescriptor::new(
+        payload_id,
+        payload_bytes,
+        ElementType::Bytes,
+        ByteOrder::Little,
+        vec![payload_bytes],
+        Layout::DenseRowMajor,
+        Some(concept("legacy:encoding/lmqc-neural-latent")?),
+        Some(legacy_media_type(LegacyFormat::Lmqc).to_owned()),
+    );
+    let atom = Atom::EncodedBlock(abir::EncodedBlock::new(
+        atom_id,
+        Presence::Present,
+        Some(descriptor),
+        abir::DecodedSemantics::new(
+            concept("abir:atom/signal-block")?,
+            ElementType::F32,
+            vec![channels, window_samples],
+        ),
+    ));
+
+    // The container states its decoded rate in whole hertz, so the clock is
+    // exact rather than projected.
+    let rate = Rational::new(i128::from(container.sample_rate), 1)
+        .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?;
+
+    let mut recording = Recording::new(recording_id, vec![stream_id]);
+    for (namespace, value) in [
+        ("legacy-source-blake3", source_blake3.clone()),
+        ("lmqc.payload-kind", container.payload_kind.to_string()),
+        (
+            "lmqc.latent-shape",
+            format!("{}x{}", container.latent_c, container.latent_t),
+        ),
+    ] {
+        recording.add_source_key(
+            SourceKey::new(namespace, &value)
+                .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?,
+        );
+    }
+    // The montage is the reason this container exists; carry every name and
+    // coordinate it declared rather than summarising them.
+    if let Some(names) = container.channels.as_ref() {
+        for (index, name) in names.iter().enumerate() {
+            recording.add_source_key(
+                SourceKey::new(format!("lmqc.channel.{index}"), name)
+                    .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?,
+            );
+        }
+    }
+    if let Some(coords) = container.coords.as_ref() {
+        for (index, position) in coords.chunks_exact(3).enumerate() {
+            recording.add_source_key(
+                SourceKey::new(
+                    format!("lmqc.coordinate.{index}"),
+                    format!("{},{},{}", position[0], position[1], position[2]),
+                )
+                .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?,
+            );
+        }
+    }
+
+    let mut draft = DatasetDraft::new(dataset_id);
+    for key in anchor.source_keys()? {
+        recording.add_source_key(key);
+    }
+    draft.add_recording(recording);
+    draft.add_stream(Stream::new(
+        stream_id,
+        recording_id,
+        modality_concept(None),
+        vec![atom_id],
+        Some(clock_id),
+        None,
+        None,
+    ));
+    draft.add_atom(atom);
+    draft.add_clock(Clock::new(
+        clock_id,
+        concept("abir:clock/device")?,
+        None,
+        Rational::new(0, 1).expect("zero rational is valid"),
+        rate,
+        Rational::new(0, 1).expect("zero uncertainty is valid"),
+    ));
+    // Exact: the ENCODED payload is carried byte-for-byte. This is not a claim
+    // about the samples it would decode to.
+    draft.add_fidelity(Fidelity::new(
+        SemanticRef::of(atom_id),
+        FidelityKind::Exact,
+        None,
+        None,
+    ));
+    draft.add_source_capsule(SourceCapsule::new(
+        SourceKey::new("legacy-source-blake3", &source_blake3)
+            .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?,
+        source_content_id,
+        Some(legacy_media_type(anchor.format)),
+    ));
+    let dataset = draft
+        .validate(ValidationLimits {
+            max_logical_payload_bytes: max_decoded_bytes,
+            ..ValidationLimits::default()
+        })
+        .map_err(|report| LegacyError::SemanticValidation(format!("{report:?}")))?;
+    let dataset_json = canonical_debug_json(&dataset)
+        .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?;
+    let dataset_content_id = logical_content_id(&dataset)
+        .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?;
+
+    let mapping = MappingReport {
+        source_profile: ProfileId(anchor.format.profile().to_owned()),
+        target_profile: ProfileId("abir.semantic-v1".to_owned()),
+        semantic_coverage: SemanticCoverage::ProjectedSemantic,
+        entries: vec![
+            MappingEntry {
+                source_path: "wire.montage".to_owned(),
+                target: format!("recording:{recording_id}:source-key"),
+                disposition: MappingDisposition::Exact,
+                reason: None,
+            },
+            MappingEntry {
+                source_path: "wire.sample-rate".to_owned(),
+                target: format!("clock:{clock_id}"),
+                disposition: MappingDisposition::Exact,
+                reason: None,
+            },
+            MappingEntry {
+                source_path: "wire.payload".to_owned(),
+                target: format!("atom:{atom_id}"),
+                disposition: MappingDisposition::Quarantined,
+                reason: Some(
+                    "the neural latent stays encoded: decoding it needs the neural decoder and \
+                     its weights, which this adapter does not carry"
+                        .to_owned(),
+                ),
+            },
+        ],
+        preserved_unknowns: 1,
+        sample_values_changed: false,
+        timing_changed: false,
+    };
+    let mut mapping = mapping;
+    mapping.entries.extend(anchor.extra_mapping.iter().cloned());
+    mapping.preserved_unknowns += anchor.extra_mapping.len() as u64;
+    let mapping_report = serde_json::to_vec_pretty(&mapping)
+        .map_err(|error| LegacyError::InvalidProtocol(error.to_string()))?;
+    let fidelity = SemanticFidelityReport {
+        schema: "lamquant.legacy-fidelity/v1".to_owned(),
+        source_profile: anchor.format.profile().to_owned(),
+        exact_source_restoration: true,
+        // No sample values were produced, so none can be claimed exact.
+        exact_sample_values: false,
+        sample_values_changed: false,
+        timing_equivalence: true,
+        modality_equivalence: false,
+        semantic_equivalence: false,
+        source_capsule_file: SOURCE_FILE.to_owned(),
+        caveats: vec![
+            "the payload remains an encoded neural latent; no sample-domain signal is produced"
+                .to_owned(),
+            "LMQC records no biosignal modality, so the stream modality is unknown-at-source"
+                .to_owned(),
+        ],
+    };
+    let mut fidelity = fidelity;
+    fidelity
+        .caveats
+        .extend(anchor.extra_caveats.iter().cloned());
+    let fidelity_report = serde_json::to_vec_pretty(&fidelity)
+        .map_err(|error| LegacyError::InvalidProtocol(error.to_string()))?;
+    let receipt = SemanticImportReceipt {
+        profile: anchor.format.profile().to_owned(),
+        source_blake3,
+        source_bytes: anchor.bytes.len() as u64,
+        decoded_channels: channels,
+        decoded_samples_per_channel: window_samples,
+        decoded_payload_bytes: payload_bytes,
+        dataset_content_id: dataset_content_id.to_string(),
+        payload_content_id: payload_id.to_string(),
+        source_preserved: true,
+        exact_sample_values: false,
+        exact_source_restoration: true,
+        semantic_equivalence: false,
+        timing: "regular".to_owned(),
+        modality: "legacy:modality/unknown-at-source".to_owned(),
+        semantic_coverage: "projected-semantic".to_owned(),
+    };
+    let semantic_receipt = serde_json::to_vec_pretty(&receipt)
+        .map_err(|error| LegacyError::InvalidProtocol(error.to_string()))?;
+    Ok(SemanticArtifacts {
+        receipt,
+        dataset_json,
+        payloads: vec![(LMQC_PAYLOAD_FILE.to_owned(), payload)],
+        mapping_report,
+        fidelity_report,
+        semantic_receipt,
     })
 }
 
@@ -1252,8 +1782,8 @@ fn verify_decoded_shape(signal: &[Vec<i64>], facts: &ContainerFacts) -> Result<(
 /// byte-exact in the source capsule, but they are never promoted to recordings.
 fn build_lma_artifacts(
     source: &[u8],
+    anchor: &SourceAnchor<'_>,
     max_decoded_bytes: u64,
-    format: LegacyFormat,
 ) -> Result<SemanticArtifacts, LegacyError> {
     use lamquant_lml_archive::lma;
 
@@ -1265,10 +1795,10 @@ fn build_lma_artifacts(
     let entries = lma::list_archive(archive_path)
         .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
 
-    let source_hash = blake3::hash(source);
+    let source_hash = blake3::hash(anchor.bytes);
     let source_blake3 = source_hash.to_hex().to_string();
     let dataset_id = derive_id::<DatasetTag>(source_hash.as_bytes(), b"dataset");
-    let source_content_id = payload_content_id(ElementType::Bytes, source);
+    let source_content_id = payload_content_id(ElementType::Bytes, anchor.bytes);
     let mut draft = DatasetDraft::new(dataset_id);
 
     let mut payloads: Vec<(String, Vec<u8>)> = Vec::new();
@@ -1402,6 +1932,9 @@ fn build_lma_artifacts(
             SourceKey::new("legacy-lma-entry-sha256", &entry.sha256)
                 .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?,
         );
+        for key in anchor.source_keys()? {
+            recording.add_source_key(key);
+        }
         draft.add_recording(recording);
         draft.add_stream(Stream::new(
             stream_id,
@@ -1450,7 +1983,7 @@ fn build_lma_artifacts(
         SourceKey::new("legacy-source-blake3", &source_blake3)
             .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?,
         source_content_id,
-        Some(legacy_media_type(format)),
+        Some(legacy_media_type(anchor.format)),
     ));
     let limits = ValidationLimits {
         max_logical_payload_bytes: max_decoded_bytes,
@@ -1465,7 +1998,7 @@ fn build_lma_artifacts(
         .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?;
 
     let mapping = MappingReport {
-        source_profile: ProfileId(format.profile().to_owned()),
+        source_profile: ProfileId(anchor.format.profile().to_owned()),
         target_profile: ProfileId("abir.semantic-v1".to_owned()),
         semantic_coverage: SemanticCoverage::ProjectedSemantic,
         entries: vec![
@@ -1501,11 +2034,14 @@ fn build_lma_artifacts(
         sample_values_changed: false,
         timing_changed: false,
     };
+    let mut mapping = mapping;
+    mapping.entries.extend(anchor.extra_mapping.iter().cloned());
+    mapping.preserved_unknowns += anchor.extra_mapping.len() as u64;
     let mapping_report = serde_json::to_vec_pretty(&mapping)
         .map_err(|error| LegacyError::InvalidProtocol(error.to_string()))?;
     let fidelity = SemanticFidelityReport {
         schema: "lamquant.legacy-fidelity/v1".to_owned(),
-        source_profile: format.profile().to_owned(),
+        source_profile: anchor.format.profile().to_owned(),
         exact_source_restoration: true,
         exact_sample_values: true,
         sample_values_changed: false,
@@ -1525,12 +2061,16 @@ fn build_lma_artifacts(
             "legacy archive metadata remains quarantined in the exact source capsule".to_owned(),
         ],
     };
+    let mut fidelity = fidelity;
+    fidelity
+        .caveats
+        .extend(anchor.extra_caveats.iter().cloned());
     let fidelity_report = serde_json::to_vec_pretty(&fidelity)
         .map_err(|error| LegacyError::InvalidProtocol(error.to_string()))?;
     let receipt = SemanticImportReceipt {
-        profile: format.profile().to_owned(),
+        profile: anchor.format.profile().to_owned(),
         source_blake3,
-        source_bytes: source.len() as u64,
+        source_bytes: anchor.bytes.len() as u64,
         decoded_channels: total_channels,
         decoded_samples_per_channel: total_samples,
         decoded_payload_bytes: total_payload_bytes,
@@ -1564,6 +2104,7 @@ fn build_lma_artifacts(
 
 fn build_lqtp1_artifacts(
     source: &[u8],
+    anchor: &SourceAnchor<'_>,
     max_decoded_bytes: u64,
 ) -> Result<SemanticArtifacts, LegacyError> {
     parse_lqtp1_header(source)?;
@@ -1600,10 +2141,10 @@ fn build_lqtp1_artifacts(
         }
     }
 
-    let source_hash = blake3::hash(source);
+    let source_hash = blake3::hash(anchor.bytes);
     let source_blake3 = source_hash.to_hex().to_string();
     let payload_id = payload_content_id(ElementType::F32, &payload);
-    let source_content_id = payload_content_id(ElementType::Bytes, source);
+    let source_content_id = payload_content_id(ElementType::Bytes, anchor.bytes);
     let dataset_id = derive_id::<DatasetTag>(source_hash.as_bytes(), b"dataset");
     let recording_id = derive_id::<RecordingTag>(source_hash.as_bytes(), b"recording");
     let stream_id = derive_id::<StreamTag>(source_hash.as_bytes(), b"stream");
@@ -1651,6 +2192,9 @@ fn build_lqtp1_artifacts(
             .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?,
     );
     let mut draft = DatasetDraft::new(dataset_id);
+    for key in anchor.source_keys()? {
+        recording.add_source_key(key);
+    }
     draft.add_recording(recording);
     draft.add_stream(Stream::new(
         stream_id,
@@ -1672,7 +2216,7 @@ fn build_lqtp1_artifacts(
         SourceKey::new("legacy-source-blake3", &source_blake3)
             .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?,
         source_content_id,
-        Some(legacy_media_type(LegacyFormat::Lqtp1)),
+        Some(legacy_media_type(anchor.format)),
     ));
     let dataset = draft
         .validate(ValidationLimits {
@@ -1685,7 +2229,7 @@ fn build_lqtp1_artifacts(
     let dataset_content_id = logical_content_id(&dataset)
         .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?;
     let mapping = MappingReport {
-        source_profile: ProfileId(LegacyFormat::Lqtp1.profile().to_owned()),
+        source_profile: ProfileId(anchor.format.profile().to_owned()),
         target_profile: ProfileId("abir.semantic-v1".to_owned()),
         semantic_coverage: SemanticCoverage::ProjectedSemantic,
         entries: vec![
@@ -1715,11 +2259,14 @@ fn build_lqtp1_artifacts(
         sample_values_changed: false,
         timing_changed: false,
     };
+    let mut mapping = mapping;
+    mapping.entries.extend(anchor.extra_mapping.iter().cloned());
+    mapping.preserved_unknowns += anchor.extra_mapping.len() as u64;
     let mapping_report = serde_json::to_vec_pretty(&mapping)
         .map_err(|error| LegacyError::InvalidProtocol(error.to_string()))?;
     let fidelity = SemanticFidelityReport {
         schema: "lamquant.legacy-fidelity/v1".to_owned(),
-        source_profile: LegacyFormat::Lqtp1.profile().to_owned(),
+        source_profile: anchor.format.profile().to_owned(),
         exact_source_restoration: true,
         exact_sample_values: true,
         sample_values_changed: false,
@@ -1732,12 +2279,16 @@ fn build_lqtp1_artifacts(
             "row identities remain external and are bound only by manifest SHA-256".to_owned(),
         ],
     };
+    let mut fidelity = fidelity;
+    fidelity
+        .caveats
+        .extend(anchor.extra_caveats.iter().cloned());
     let fidelity_report = serde_json::to_vec_pretty(&fidelity)
         .map_err(|error| LegacyError::InvalidProtocol(error.to_string()))?;
     let receipt = SemanticImportReceipt {
-        profile: LegacyFormat::Lqtp1.profile().to_owned(),
+        profile: anchor.format.profile().to_owned(),
         source_blake3,
-        source_bytes: source.len() as u64,
+        source_bytes: anchor.bytes.len() as u64,
         decoded_channels: channels,
         decoded_samples_per_channel: windows
             .checked_mul(samples)
@@ -1784,12 +2335,12 @@ fn parse_lqtp1_header(
 }
 
 fn build_semantic_artifacts(
-    source: &[u8],
+    anchor: &SourceAnchor<'_>,
     facts: &ContainerFacts,
     signal: Vec<Vec<i64>>,
     max_decoded_bytes: u64,
 ) -> Result<SemanticArtifacts, LegacyError> {
-    let source_hash = blake3::hash(source);
+    let source_hash = blake3::hash(anchor.bytes);
     let source_blake3 = source_hash.to_hex().to_string();
     let mut payload = Vec::with_capacity(
         usize::try_from(facts.decoded_payload_bytes).map_err(|_| LegacyError::DecodedTooLarge)?,
@@ -1803,7 +2354,7 @@ fn build_semantic_artifacts(
         return Err(LegacyError::DecodedTooLarge);
     }
     let payload_id = payload_content_id(ElementType::I64, &payload);
-    let source_content_id = payload_content_id(ElementType::Bytes, source);
+    let source_content_id = payload_content_id(ElementType::Bytes, anchor.bytes);
     let dataset_id = derive_id::<DatasetTag>(source_hash.as_bytes(), b"dataset");
     let recording_id = derive_id::<RecordingTag>(source_hash.as_bytes(), b"recording");
     let stream_id = derive_id::<StreamTag>(source_hash.as_bytes(), b"stream");
@@ -1861,6 +2412,9 @@ fn build_semantic_artifacts(
             .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?,
     );
     let mut draft = DatasetDraft::new(dataset_id);
+    for key in anchor.source_keys()? {
+        recording.add_source_key(key);
+    }
     draft.add_recording(recording);
     draft.add_stream(Stream::new(
         stream_id,
@@ -1892,7 +2446,7 @@ fn build_semantic_artifacts(
         SourceKey::new("legacy-source-blake3", &source_blake3)
             .map_err(|error| LegacyError::SemanticValidation(error.to_string()))?,
         source_content_id,
-        Some(legacy_media_type(facts.format)),
+        Some(legacy_media_type(anchor.format)),
     ));
     let limits = ValidationLimits {
         max_logical_payload_bytes: max_decoded_bytes,
@@ -1908,12 +2462,20 @@ fn build_semantic_artifacts(
 
     let timing_equivalence = facts.sample_rate_millihz.is_some();
     let modality_equivalence = facts.modality_tag.is_some();
-    let mapping = mapping_report(facts, timing_equivalence, modality_equivalence);
+    let mapping = mapping_report(
+        &ProfileId(anchor.format.profile().to_owned()),
+        facts,
+        timing_equivalence,
+        modality_equivalence,
+    );
+    let mut mapping = mapping;
+    mapping.entries.extend(anchor.extra_mapping.iter().cloned());
+    mapping.preserved_unknowns += anchor.extra_mapping.len() as u64;
     let mapping_report = serde_json::to_vec_pretty(&mapping)
         .map_err(|error| LegacyError::InvalidProtocol(error.to_string()))?;
     let fidelity = SemanticFidelityReport {
         schema: "lamquant.legacy-fidelity/v1".to_owned(),
-        source_profile: facts.format.profile().to_owned(),
+        source_profile: anchor.format.profile().to_owned(),
         exact_source_restoration: true,
         exact_sample_values: true,
         sample_values_changed: false,
@@ -1927,12 +2489,16 @@ fn build_semantic_artifacts(
                 .to_owned(),
         ],
     };
+    let mut fidelity = fidelity;
+    fidelity
+        .caveats
+        .extend(anchor.extra_caveats.iter().cloned());
     let fidelity_report = serde_json::to_vec_pretty(&fidelity)
         .map_err(|error| LegacyError::InvalidProtocol(error.to_string()))?;
     let receipt = SemanticImportReceipt {
-        profile: facts.format.profile().to_owned(),
+        profile: anchor.format.profile().to_owned(),
         source_blake3,
-        source_bytes: source.len() as u64,
+        source_bytes: anchor.bytes.len() as u64,
         decoded_channels: facts.channels,
         decoded_samples_per_channel: facts.samples_per_channel,
         decoded_payload_bytes: facts.decoded_payload_bytes,
@@ -1964,6 +2530,7 @@ fn build_semantic_artifacts(
 }
 
 fn mapping_report(
+    profile: &ProfileId,
     facts: &ContainerFacts,
     timing_equivalence: bool,
     modality_equivalence: bool,
@@ -2007,7 +2574,7 @@ fn mapping_report(
         });
     }
     MappingReport {
-        source_profile: ProfileId(facts.format.profile().to_owned()),
+        source_profile: profile.clone(),
         target_profile: ProfileId("abir.semantic-v1".to_owned()),
         semantic_coverage: SemanticCoverage::ProjectedSemantic,
         entries,
@@ -2052,12 +2619,20 @@ fn derive_id<T>(source_hash: &[u8; 32], label: &[u8]) -> ObjectId<T> {
     ObjectId::from_bytes(bytes)
 }
 
+/// Every retired profile gets its OWN media type. A shared fallback would let
+/// the capsule-exact export path accept a capsule of the wrong generation,
+/// because that path identifies the source wire by its capsule media type.
 fn legacy_media_type(format: LegacyFormat) -> &'static str {
     match format {
         LegacyFormat::Bcs1 => "application/vnd.lamquant.bcs1",
         LegacyFormat::Lml1 => "application/vnd.lamquant.lml1",
+        LegacyFormat::Lma1 => "application/vnd.lamquant.lma1",
+        LegacyFormat::Lma2 => "application/vnd.lamquant.lma2",
+        LegacyFormat::Lmqc => "application/vnd.lamquant.lmqc",
+        LegacyFormat::Lmlcrypt => "application/vnd.lamquant.lmlcrypt",
         LegacyFormat::Lqtp1 => "application/vnd.lamquant.lqtp1",
-        _ => "application/octet-stream",
+        LegacyFormat::Lqtp2 => "application/vnd.lamquant.lqtp2",
+        LegacyFormat::Lqtp3 => "application/vnd.lamquant.lqtp3",
     }
 }
 

@@ -25,6 +25,7 @@ repository = "https://github.com/Quitetall/lamquant-legacy"
 [workspace.dependencies]
 abir = { git = "https://github.com/Quitetall/ABIR.git", rev = "5fb448361e762f5ae17f9b760be16f40632cd1f3", version = "=0.1.0" }
 abir-adapter = { git = "https://github.com/Quitetall/ABIR.git", rev = "5fb448361e762f5ae17f9b760be16f40632cd1f3", version = "=0.1.0" }
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 blake3 = { version = "=1.5.5", default-features = false }
 bytemuck = "=1.25.0"
 lamquant-legacy-ir = { path = "crates/lamquant-legacy-ir", version = "=0.1.1" }

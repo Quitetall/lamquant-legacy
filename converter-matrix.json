@@ -46,10 +46,22 @@
       "reverse_export": "PASS_PROJECTED_EXACT_SAMPLES_AS_V2"
     },
     "legacy.lmqc.v1": {
-      "status": "NOT_CLAIMED"
+      "status": "PASS_PROJECTED",
+      "montage": "EXACT",
+      "timing": "EXACT",
+      "neural_payload": "QUARANTINED_ENCODED",
+      "sample_values": "NOT_PRODUCED",
+      "source_capsule": "EXACT",
+      "modality": "UNKNOWN_AT_SOURCE",
+      "reverse_export": "PASS_EXACT_SOURCE_CAPSULE"
     },
     "legacy.lmlcrypt.v1": {
-      "status": "NOT_CLAIMED"
+      "status": "PASS_PROJECTED",
+      "envelope": "AUTHENTICATED_NONCE_RECORDED",
+      "inner_container": "IMPORTED_ANCHORED_TO_CIPHERTEXT",
+      "key_material": "NEVER_IN_DATASET",
+      "source_capsule": "EXACT",
+      "reverse_export": "PASS_EXACT_SOURCE_CAPSULE"
     },
     "legacy.lqtp.v1": {
       "status": "PASS_PROJECTED",

@@ -574,12 +574,12 @@ fn semantic_import_bounds_decoded_allocation_before_output() {
 #[test]
 fn unsupported_profile_does_not_overstate_semantic_import() {
     let temp = tempfile::tempdir().unwrap();
-    let source = temp.path().join("input.lma");
+    let source = temp.path().join("input.lqtp2");
     let output = temp.path().join("semantic");
-    // Both LMA generations now import semantically, so this fixture must use a
-    // profile that is still genuinely unsupported for the assertion to mean
-    // anything.
-    fs::write(&source, b"LMQCpayload").unwrap();
+    // LMA, LMQC and LMLCRYPT all import semantically now, so this fixture must
+    // use a profile that is still genuinely unsupported for the assertion to
+    // mean anything. LQTP2 is recognised but has no importer.
+    fs::write(&source, b"LQT2payload").unwrap();
     let error = import_semantic(&SemanticImportRequest {
         source,
         destination: output.clone(),
@@ -599,11 +599,12 @@ fn unsupported_profile_does_not_overstate_semantic_import() {
             .unwrap()
             .semantic_import
     );
+    // LQTP2 is the remaining unsupported profile: recognised, never imported.
     assert!(
         !manifest
             .capabilities
             .iter()
-            .find(|value| value.profile == "legacy.lmqc.v1")
+            .find(|value| value.profile == "legacy.lqtp.v2")
             .unwrap()
             .semantic_import
     );
@@ -661,8 +662,23 @@ fn committed_converter_matrix_scopes_semantic_claims_per_profile() {
         matrix["semantic_profiles"]["legacy.lma.v1"]["reverse_export"],
         "PASS_PROJECTED_EXACT_SAMPLES_AS_V2"
     );
+    // LMQC claims the montage and clock it really recovers, and says plainly
+    // that the neural payload stays encoded and no samples are produced.
     assert_eq!(
-        matrix["semantic_profiles"]["legacy.lmqc.v1"]["status"],
+        matrix["semantic_profiles"]["legacy.lmqc.v1"]["sample_values"],
+        "NOT_PRODUCED"
+    );
+    assert_eq!(
+        matrix["semantic_profiles"]["legacy.lmqc.v1"]["neural_payload"],
+        "QUARANTINED_ENCODED"
+    );
+    // The AEAD envelope never lets key material into the dataset.
+    assert_eq!(
+        matrix["semantic_profiles"]["legacy.lmlcrypt.v1"]["key_material"],
+        "NEVER_IN_DATASET"
+    );
+    assert_eq!(
+        matrix["semantic_profiles"]["legacy.lqtp.v2"]["status"],
         "NOT_CLAIMED"
     );
     assert_eq!(
@@ -887,4 +903,177 @@ fn lma_reverse_export_re_emits_every_recording_with_exact_samples() {
     let entries = lamquant_lml_archive::lma::list_archive(&out).unwrap();
     assert_eq!(entries.len(), 2);
     assert!(fs::read(&out).unwrap().starts_with(b"LMA2"));
+}
+
+fn lmqc_source() -> Vec<u8> {
+    lamquant_lml_mcu::lmqc::encode_lmqc(
+        2,
+        32,
+        79,
+        250,
+        2500,
+        lamquant_lml_mcu::lmqc::PAYLOAD_FP16_LATENT,
+        Some(&[0.1, 0.2, 0.3, -0.1, -0.2, -0.3]),
+        Some(&["Fp1".to_owned(), "Fp2".to_owned()]),
+        b"opaque encoded latent bytes",
+    )
+    .unwrap()
+}
+
+#[test]
+fn lmqc_semantic_import_recovers_the_montage_without_inventing_samples() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("input.lmq");
+    let bytes = lmqc_source();
+    fs::write(&source, &bytes).unwrap();
+
+    let output = temp.path().join("semantic");
+    let receipt = import_semantic(&SemanticImportRequest {
+        source: source.clone(),
+        destination: output.clone(),
+        accept_fidelity: true,
+        max_source_bytes: 1 << 20,
+        max_decoded_bytes: 1 << 20,
+    })
+    .unwrap();
+
+    assert_eq!(receipt.profile, "legacy.lmqc.v1");
+    // The montage and clock are recovered exactly; samples are NOT produced,
+    // and the receipt must not pretend otherwise.
+    assert_eq!(receipt.decoded_channels, 2);
+    assert_eq!(receipt.decoded_samples_per_channel, 2500);
+    assert!(!receipt.exact_sample_values);
+    assert!(receipt.exact_source_restoration);
+    assert_eq!(receipt.timing, "regular");
+
+    // The payload written out is the ENCODED latent, byte for byte.
+    let payload = fs::read(output.join("payload.lmqc-latent")).unwrap();
+    assert_eq!(payload, b"opaque encoded latent bytes");
+
+    let fidelity: serde_json::Value =
+        serde_json::from_slice(&fs::read(output.join("fidelity-report.json")).unwrap()).unwrap();
+    assert_eq!(fidelity["exact_sample_values"], false);
+    assert_eq!(fidelity["timing_equivalence"], true);
+
+    let dataset = String::from_utf8(fs::read(output.join("dataset.json")).unwrap()).unwrap();
+    assert!(dataset.contains("Fp1") && dataset.contains("Fp2"));
+
+    // Reverse export re-emits the retired blob byte-for-byte.
+    let out = temp.path().join("reemitted.lmq");
+    let export = export_semantic(&SemanticExportRequest {
+        format: LegacyFormat::Lmqc,
+        dataset: output.join("dataset.json"),
+        payloads: vec![ExportPayload {
+            content_id: abir::payload_content_id(abir::ElementType::Bytes, &bytes).to_string(),
+            path: source,
+        }],
+        destination: out.clone(),
+        accept_fidelity: true,
+        max_dataset_bytes: 1 << 20,
+        max_payload_bytes: 1 << 20,
+        max_output_bytes: 1 << 20,
+        window_size: 2500,
+    })
+    .unwrap();
+    assert_eq!(export.profile, "legacy.lmqc.v1");
+    assert_eq!(fs::read(out.join("legacy-output.bin")).unwrap(), bytes);
+}
+
+/// Seal `plaintext` the way the retired `lml encrypt` did: magic, version,
+/// nonce, then the AES-256-GCM ciphertext with its appended tag.
+fn lmlcrypt_source(plaintext: &[u8], key: &[u8; 32], nonce: &[u8; 12]) -> Vec<u8> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    let cipher = aes_gcm::Aes256Gcm::new_from_slice(key).unwrap();
+    let ciphertext = cipher
+        .encrypt(aes_gcm::Nonce::from_slice(nonce), plaintext)
+        .unwrap();
+    let mut blob = Vec::new();
+    blob.extend_from_slice(b"LMLCRYPT");
+    blob.push(1);
+    blob.extend_from_slice(nonce);
+    blob.extend_from_slice(&ciphertext);
+    blob
+}
+
+#[test]
+fn lmlcrypt_import_anchors_the_dataset_to_the_ciphertext_and_needs_the_key() {
+    let temp = tempfile::tempdir().unwrap();
+    let inner = lml1_source_from_bcs1(&bcs1_source());
+    let key = [0x2b_u8; 32];
+    let blob = lmlcrypt_source(&inner, &key, &[7_u8; 12]);
+    let source = temp.path().join("input.enc");
+    fs::write(&source, &blob).unwrap();
+
+    let request = SemanticImportRequest {
+        source: source.clone(),
+        destination: temp.path().join("semantic"),
+        accept_fidelity: true,
+        max_source_bytes: 1 << 20,
+        max_decoded_bytes: 1 << 20,
+    };
+
+    // Without the key the envelope fails closed with a capability error, and
+    // writes nothing -- it is not reported as a malformed file.
+    std::env::remove_var("LAMQUANT_KEY");
+    assert_eq!(
+        import_semantic(&request).unwrap_err(),
+        LegacyError::KeyUnavailable
+    );
+    assert!(!request.destination.exists());
+
+    std::env::set_var(
+        "LAMQUANT_KEY",
+        key.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+    );
+    let receipt = import_semantic(&request).unwrap();
+    std::env::remove_var("LAMQUANT_KEY");
+
+    // The dataset names the bytes on disk -- the ciphertext -- not the
+    // plaintext nobody holds a copy of.
+    assert_eq!(receipt.profile, "legacy.lmlcrypt.v1");
+    assert_eq!(receipt.source_bytes, blob.len() as u64);
+    assert_eq!(receipt.source_blake3, blake3_hex(&blob));
+    // The inner container's real semantics came through.
+    assert_eq!(receipt.decoded_channels, 2);
+    assert_eq!(receipt.decoded_samples_per_channel, 5);
+    assert!(receipt.exact_sample_values);
+
+    let dataset =
+        String::from_utf8(fs::read(request.destination.join("dataset.json")).unwrap()).unwrap();
+    assert!(dataset.contains("lmlcrypt.nonce"));
+    assert!(dataset.contains("legacy.lml1.v1"), "inner profile recorded");
+    // Key material never reaches the dataset.
+    assert!(!dataset.contains("2b2b2b2b"));
+
+    let fidelity: serde_json::Value = serde_json::from_slice(
+        &fs::read(request.destination.join("fidelity-report.json")).unwrap(),
+    )
+    .unwrap();
+    let caveats = fidelity["caveats"].as_array().unwrap();
+    assert!(caveats
+        .iter()
+        .any(|caveat| caveat.as_str().unwrap().contains("AES-256-GCM")));
+
+    // A tampered blob is refused: the tag no longer authenticates.
+    let mut tampered = blob.clone();
+    let last = tampered.len() - 1;
+    tampered[last] ^= 0xff;
+    let tampered_path = temp.path().join("tampered.enc");
+    fs::write(&tampered_path, &tampered).unwrap();
+    std::env::set_var(
+        "LAMQUANT_KEY",
+        key.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+    );
+    let error = import_semantic(&SemanticImportRequest {
+        source: tampered_path,
+        destination: temp.path().join("tampered-out"),
+        ..request.clone()
+    })
+    .unwrap_err();
+    std::env::remove_var("LAMQUANT_KEY");
+    assert!(matches!(error, LegacyError::MalformedContainer(_)));
+}
+
+fn blake3_hex(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
 }
