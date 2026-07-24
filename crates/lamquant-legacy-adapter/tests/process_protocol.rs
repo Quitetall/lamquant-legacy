@@ -89,11 +89,16 @@ fn every_retired_magic_has_a_stable_profile() {
         (b"LMQCpayload", LegacyFormat::Lmqc),
         (b"LMLCRYPTpayload", LegacyFormat::Lmlcrypt),
         (b"LQTP\x01payload", LegacyFormat::Lqtp1),
-        (b"LQTP\x02payload", LegacyFormat::Lqtp2),
-        (b"LQTP\x03payload", LegacyFormat::Lqtp3),
+        // LQTP2/LQTP3 took their own four-byte magics rather than bumping
+        // LQTP1's version byte, so `LQTP\x02` names no wire that ever shipped.
+        (b"LQT2payload", LegacyFormat::Lqtp2),
+        (b"LQT3payload", LegacyFormat::Lqtp3),
     ];
     for (bytes, expected) in cases {
         assert_eq!(detect_format(bytes).unwrap(), *expected);
+    }
+    for absent in [b"LQTP\x02payload".as_slice(), b"LQTP\x03payload".as_slice()] {
+        assert_eq!(detect_format(absent), Err(LegacyError::UnknownMagic));
     }
 }
 

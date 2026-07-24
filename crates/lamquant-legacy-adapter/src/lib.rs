@@ -335,11 +335,19 @@ pub fn detect_format(bytes: &[u8]) -> Result<LegacyFormat, LegacyError> {
     if bytes.starts_with(b"LMQC") {
         return Ok(LegacyFormat::Lmqc);
     }
+    // The three tensor-pack generations do NOT share one magic with a version
+    // byte: LQTP1 is `LQTP` + version 1, while LQTP2 and LQTP3 each took their
+    // own four-byte magic (`LQT2` / `LQT3`). Detecting `LQTP\x02` would name a
+    // wire no writer ever produced and would refuse the real ones.
+    if bytes.starts_with(b"LQT2") {
+        return Ok(LegacyFormat::Lqtp2);
+    }
+    if bytes.starts_with(b"LQT3") {
+        return Ok(LegacyFormat::Lqtp3);
+    }
     if bytes.starts_with(b"LQTP") && bytes.len() >= 5 {
         return match bytes[4] {
             1 => Ok(LegacyFormat::Lqtp1),
-            2 => Ok(LegacyFormat::Lqtp2),
-            3 => Ok(LegacyFormat::Lqtp3),
             _ => Err(LegacyError::UnknownMagic),
         };
     }
