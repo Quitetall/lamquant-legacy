@@ -1,0 +1,17 @@
+[package]
+name = "lamquant-lma-training-legacy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Process-isolated launcher for retired LMA-direct LamQuant trainers"
+
+[dependencies]
+libc.workspace = true
+sha2.workspace = true
+tar = { version = "0.4", default-features = false }
+
+[dev-dependencies]
+tempfile.workspace = true

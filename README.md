@@ -37,6 +37,103 @@ Current LamQuant execution uses capability-driven ABIR Nodes, compiled plans,
 implementation-bound kernels, and transactional receipts. Compatibility tools
 may run the retired runtime in isolation; mainline code must not depend on it.
 
+## Retired LMA-direct training
+
+`lamquant-lma-training-legacy` preserves access to the eight final LMA-direct
+trainer entrypoints from `blut-lamquant` revision
+`64d4478deb2ea52193b9d9b108e9c46793701687`. It does not vendor or fetch
+trainer source. An operator supplies an existing checkout; the launcher
+requires the exact full revision, no tracked modifications, and one allowlisted
+regular script before starting Python. Untracked and ignored files also fail
+verification. Index flags and tracked Python source hashes are checked
+independently of Git status. Operator supplies absolute trusted Git and Python
+executables. Git verification runs without inherited environment, repository
+hooks, or filesystem monitors. Python must pass an isolated-interpreter
+handshake. Venv interpreters retain their requested invocation path so ordinary
+`python3 -m venv` site-packages remain active; the launcher separately
+canonicalizes, verifies, and revalidates the executable target path, device,
+and inode.
+
+Every launch also requires an absolute private workspace outside the verified
+checkout. Its parent must belong to the effective UID and must not be
+group/other writable. A private sibling lock with stable inode checks serializes
+creation, verification, preflight, and training through sandbox teardown.
+Initial construction occurs in a source-bound sibling staging directory; the
+verified tree is synced and atomically renamed into place, so interruption
+cannot publish a partial workspace or cause unrelated sibling data to be
+deleted. The launcher exports a source-only projection of the committed
+`python/lamquant` tree into `source/`; tracked `__pycache__`, `.pyc`, and `.pyo`
+files are deliberately excluded. `source-projection-v1.manifest` records the
+repository, revision, trainer, archive SHA-256, and every extracted file hash.
+Linux bubblewrap mounts that source projection and exact virtual entrypoint
+read-only inside a private PID/mount sandbox. The rest of the host filesystem is
+read-only; the persistent workspace, private `/tmp`, private `/dev/shm`, and
+host `/dev` bind are writable. Full `/dev` exposure is a deliberate accelerator
+compatibility boundary: every device already accessible to the launching user
+remains accessible to frozen code and its dependencies. Run only the verified
+trainer/dependency environment under that same-device trust contract. The
+trainer sees a matching virtual path under `run/`, so source-relative
+checkpoints and logs remain in the persistent workspace while frozen read
+resources are mounted from their hashed source bytes. Explicit output arguments
+for MAE, SSL, four-state, and joint training are owned by the launcher and routed
+to `artifacts`; exact flags and all argparse abbreviations are rejected. Reusing
+a workspace revalidates the binding, manifest, every frozen source file, virtual
+entrypoint, read resources, and absence of injected Python/native modules.
+Source is revalidated after
+dependency preflight before its host-side report is published, again after
+report publication, and after trainer exit. Host publication remains bound to
+one verified directory descriptor and cannot follow a substituted report
+parent. Validation traverses immutable
+source plus the complete writable workspace bind—including `run/`, `home/`,
+artifacts, and dependency caches—under explicit entry/depth ceilings. Scans
+reject symlinks, hard links, and special files before dependency preflight,
+immediately before launch, and after trainer exit.
+
+Before training, the launcher executes the frozen entrypoint under a non-main
+name and imports its trainer-specific lazy dependency set. Handshakes and
+preflight use nonblocking bounded output, hard deadlines, process-group
+termination, and mandatory reap. Bubblewrap's PID namespace destroys
+same-session and detached descendants before workspace unlock. Python target
+bytes, device, and inode are revalidated after preflight. Imported module
+versions are atomically recorded in
+`artifacts/dependency-preflight-v1.txt` as an observed audit report, not as a
+dependency lock; operator remains responsible for supplying one reviewed,
+immutable trainer environment. The actual process uses isolated
+imports, disables bytecode writes, clears inherited environment, and accepts
+only an explicit closed environment allowlist through repeated
+`--env NAME=VALUE` arguments. `HF_HOME`, `TORCH_HOME`, `XDG_CACHE_HOME`, and
+`WANDB_DIR` are launcher-owned paths below `artifacts/`; operators cannot
+redirect them. The CLI records HUP, INT, and TERM, forwards them from its
+supervision loop, grants a bounded checkpoint/log-flush interval, then kills any
+remaining sandbox. Signals received during Git verification, Python handshake,
+or dependency preflight retain typed interruption state and make the CLI exit
+with `128 + signal`. Linux children carry a parent-death signal. Every
+`--training-*` ABIR snapshot option and its argparse abbreviations are rejected:
+this tool executes only the retired LMA-direct branch. Duplicate or abbreviated
+dependency-affecting options are rejected. Supported hosts are Linux systems
+with `/usr/bin/bwrap`.
+
+Example:
+
+```sh
+cargo run -p lamquant-lma-training-legacy -- \
+  --git "$(command -v git)" \
+  --checkout /isolated/blut-lamquant-64d4478 \
+  --trainer train_joint \
+  --python /isolated/legacy-venv/bin/python \
+  --workspace /isolated/runs/train-joint-001 \
+  --env CUDA_VISIBLE_DEVICES=0 \
+  --env WANDB_MODE=offline \
+  -- \
+  --lma-root /archive/lma \
+  --split-manifest /archive/split.json
+```
+
+Current BLUT production recipes accept governed ABIR Training Snapshots only.
+This launcher is process-isolated rollback tooling and emits no promotable
+checkpoint attestation. `--help` prints launcher syntax; `--list-trainers`
+prints the closed eight-entry allowlist.
+
 ## Retired operation-event protocol
 
 `lamquant-op-event-legacy` preserves the final `OpEvent` enum, process runner,
