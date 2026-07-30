@@ -146,9 +146,16 @@ not a publishable Python distribution or ambient import fallback. Current
 LamQuant code uses the canonical `lamquant-core` PyO3 codec, neural-owned model
 front-end, and training-owned dataset adapters.
 
-`python3 tools/verify_retired_python_codec.py` checks the local hash manifest.
-Supplying `--source-repo` additionally proves every preserved byte against the
-originating Git revision.
+The same retirement root preserves the final setuptools project declaration,
+Python codec test suites, and normalization validation helper from revision
+`b87216ffb66ad1c38d21da2857cf07afe3a4c518` under
+`support/codec-lossless/`. This support closure is inert evidence: it has no
+top-level build declaration and is never part of this workspace's test or
+publication graph.
+
+`python3 tools/verify_retired_python_codec.py` checks both local hash manifests.
+Supplying `--source-repo` additionally proves every preserved source and support
+byte against its originating Git revision.
 
 ## Retired operation-event protocol
 

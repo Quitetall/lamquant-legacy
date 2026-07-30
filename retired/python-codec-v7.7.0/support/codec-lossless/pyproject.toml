@@ -1,0 +1,192 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lamquant-codec"
+version = "7.7.0"
+description = "LML lossless EEG compression codec + LMQ neural codec"
+readme = "README.md"
+license = {text = "AGPL-3.0-or-later"}
+requires-python = ">=3.10"
+keywords = ["eeg", "lossless", "compression", "codec", "medical", "neuroscience"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Programming Language :: Python :: 3",
+]
+# Core: lossless codec works with numpy + scipy only.
+# Neural codec, JIT acceleration, and MNE integration are optional.
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "tqdm>=4.65",
+    "prompt_toolkit>=3.0",
+    "zstandard>=0.22",
+]
+
+[project.scripts]
+# `lamquant` (no entry here) is the Rust TUI launcher binary
+# (`lamquant-lossless/src/bin/lml.rs`, installed to ~/.cargo/bin/
+# via `cargo install --path lamquant-lossless`). Adding a Python
+# console-script with the same name shadows the Rust binary on
+# PATH (pip puts ~/.local/bin/ ahead of ~/.cargo/bin/) and breaks
+# the "lamquant <no args> → TUI" contract. Python codec CLI users
+# invoke `python -m lamquant_codec.cli_entry` directly, or use one
+# of the dedicated entry points below.
+oh = "lamquant_codec.cli_entry:main"
+lamquant-decode = "lamquant_codec.cli_codec:main"
+lamquant-export = "lamquant_codec.export:main"
+lamquant-visualize = "tools.visualize_pipeline:main"
+
+[project.optional-dependencies]
+# JIT acceleration for lossless codec (3-4x faster)
+fast = ["numba>=0.59"]
+# Neural codec (requires torch)
+neural = [
+    "torch>=2.0",
+    "snntorch>=0.9",
+    "auraloss>=0.4",
+    "safetensors>=0.4",
+]
+# MNE-Python integration
+mne = ["mne>=1.5"]
+# Rust acceleration (`lml`, built separately via maturin)
+rust = ["lml>=7.7.0"]
+# Development
+test = [
+    "hypothesis>=6.0",
+    "pyedflib>=0.1",
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "coverage[toml]>=7.3",
+]
+dev = [
+    "wandb",
+    "mlflow",
+    "matplotlib>=3.7",
+]
+research = [
+    "selfEEG>=0.2",
+    "antropy>=0.1",
+    "fooof>=1.0",
+    "snac",
+]
+# Everything for local development
+all = [
+    "lamquant-codec[fast,neural,mne,test,dev]",
+]
+
+# Only lamquant_codec is a real importable library package. The training
+# scripts in ai_models/ and firmware/ are run directly (python path/to/
+# script.py) and are not installed. tools/ is included because its
+# visualize script is registered as a [project.scripts] entry point.
+#
+# lamquant_codec moved to reference_implementations/python_codec/
+# 2026-05-18 — it's the Python reference implementation now, not the
+# canonical codec (the Rust `lml` crate is). `where = [..., ".",
+# "reference_implementations/python_codec"]` keeps both `tools/` (at
+# the repo root) and `lamquant_codec/` (under
+# reference_implementations/) discoverable. The `include`/`exclude`
+# filters still apply; the only change is where setuptools looks.
+[tool.setuptools.packages.find]
+where = [".", "reference_implementations/python_codec"]
+include = ["lamquant_codec*", "tools*"]
+exclude = ["tests*", "gui*", "docs*", "build*", "ai_models*", "firmware*", "installer*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+]
+markers = [
+    # Test taxonomy (codec/ wire-format suite)
+    "l1: KAT — fixed input, fixed output (codec/ only)",
+    "l2: property/invariant",
+    "l3: metamorphic / regression",
+    "l4: fuzz",
+    "l5: cross-implementation parity (Py↔Rust↔C)",
+    "l7: adversarial / boundary",
+    # Resource markers (used by CI lanes)
+    "slow: model loading or heavy computation (>5s)",
+    "perf: performance regression sentinel (nightly only)",
+    "data: requires real EEG (q31_events / manifest_v3)",
+    "checkpoint: requires trained weights on disk",
+    "rust: requires lamquant_core PyO3 wheel",
+    "c_host: compiles and runs C code on the host",
+    "doctest: doctest collection target",
+    "cross_lang: Python↔Rust drift sentinel",
+]
+doctest_optionflags = ["NORMALIZE_WHITESPACE", "ELLIPSIS"]
+
+[tool.coverage.run]
+# v1.2 T.2 — extended scope to `lamquant_codec` (the Python codec
+# wrapper around the Rust crate). The pre-existing floor of 33% in
+# `.coverage_floor.json` covers ai_models + firmware; codec coverage
+# starts unmeasured and ratchets up alongside the existing gate.
+source = ["ai_models", "firmware", "lamquant_codec"]
+omit = [
+    "tests/benchmarks/*",
+    # ad-hoc admin tools that scan the on-disk corpus; no production
+    # consumer + can't run in CI without the full TUEG mount
+    "ai_models/dataset_sim/audit_dataset.py",
+    "ai_models/dataset_sim/generate_validation_split.py",
+    "ai_models/dataset_sim/validate_cross_dataset.py",
+    "ai_models/dataset_sim/validate_subband.py",
+    "ai_models/dataset_sim/edf_to_events.py",
+    "ai_models/snn/generate_activity_labels.py",
+    "ai_models/oracle/*",
+    "ai_models/student/train_student_subband.py",
+    "ai_models/student/harden_artifacts.py",
+    # GUI scope per feedback_frontend_only_scope (2026-05-10): TUI
+    # workflows integrate into GUI ribbon panels; the Python cockpit
+    # is the reference contract + not the edit target. Coverage of
+    # the 1127-LOC TUI script provides no test signal worth chasing.
+    "ai_models/training_cockpit.py",
+    # Interactive prompt-toolkit loops — the menu/eagle/readout flow
+    # needs a real TTY + keystroke driver. Pure helpers under these
+    # files ARE tested; the interactive event-loop bodies are not
+    # reachable from pytest and would inflate the surface that
+    # pretends to be tested.
+    "reference_implementations/python_codec/lamquant_codec/cli/syscheck.py",
+    "reference_implementations/python_codec/lamquant_codec/cli/menu.py",
+    "reference_implementations/python_codec/lamquant_codec/cli/eagle.py",
+    "reference_implementations/python_codec/lamquant_codec/cli/readout.py",
+    # Cockpit shim — re-exports from legacy/python_cockpit/ which is
+    # itself the retired Python cockpit (ADR 0017). Coverage of the
+    # shim adds no test signal beyond the import smoke we already
+    # have in tests/codec_python_smoke/.
+    "reference_implementations/python_codec/lamquant_codec/cli/cockpit.py",
+    # Experimental / research-track modules. Not on the production
+    # path. Smoke-imports cover the load surface; deeper testing waits
+    # until they graduate to production.
+    "reference_implementations/python_codec/lamquant_codec/experimental/*",
+    # Legacy shim (preserved-but-not-edited). Re-exports the retired
+    # lossless implementation for backward-compat readers; the modern
+    # path lives in lamquant_codec.lossless.
+    "reference_implementations/python_codec/lamquant_codec/legacy/*",
+    # Setup helper run once at install time. Not on the codec path.
+    "reference_implementations/python_codec/lamquant_codec/setup_cmd.py",
+    # Per-test files inside source packages — those are tests, not
+    # production code. Coverage of these files is not meaningful.
+    "ai_models/snn/tests/*",
+]
+
+[tool.coverage.report]
+# fail_under intentionally low — the real gate is `.coverage_floor.json`
+# enforced by `tests/run_diagnostics.py coverage_floor`. This value only
+# matters if someone bypasses the ratchet.
+fail_under = 25
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING",
+]

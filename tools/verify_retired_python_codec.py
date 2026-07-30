@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the exact, non-publishable retired Python codec source snapshot."""
+"""Verify retired Python codec source plus its final test/support closure."""
 
 from __future__ import annotations
 
@@ -17,12 +17,35 @@ RETIREMENT_ROOT = ROOT / "retired/python-codec-v7.7.0"
 SOURCE_ROOT = RETIREMENT_ROOT / "source/lamquant_codec"
 MANIFEST_PATH = RETIREMENT_ROOT / "source-manifest.json"
 SCHEMA = "lamquant.legacy.python-codec-source/v1"
+SUPPORT_ROOT = RETIREMENT_ROOT / "support/codec-lossless"
+SUPPORT_MANIFEST_PATH = RETIREMENT_ROOT / "support-manifest.json"
+SUPPORT_SCHEMA = "lamquant.legacy.python-codec-support/v1"
 SOURCE_REPOSITORY = "https://github.com/Quitetall/LamQuant-Lossless.git"
 SOURCE_REVISION = "f9b915466e67a87ad8d290a9793d349df250c9fb"
 SOURCE_PATH = "reference_implementations/python_codec/lamquant_codec"
+SUPPORT_REVISION = "b87216ffb66ad1c38d21da2857cf07afe3a4c518"
+SUPPORT_PATHS = (
+    "pyproject.toml",
+    "tests/codec",
+    "tests/codec_python_smoke",
+    "tests/conftest.py",
+    "tests/container/test_lml_container.py",
+    "tests/edf_reader/test_edf_reader.py",
+    "tests/edf_reader/test_mne_io.py",
+    "tests/helpers/asserts.py",
+    "tests/helpers/roundtrip.py",
+    "tests/integration/test_batch.py",
+    "tests/integration/test_init_wizard.py",
+    "tests/integration/test_l3_batch.py",
+    "tests/integration/test_l3_e2e_codec.py",
+    "tests/integration/test_lma_dataset.py",
+    "tests/integration/test_perf_sentinels.py",
+    "tests/integration/test_snn_codec_integration.py",
+    "tools/validate_rust_normalize.py",
+)
 FORBIDDEN_PACKAGING = ("pyproject.toml", "setup.py", "setup.cfg")
 MAX_FILES = 1_000
-MAX_BYTES = 16 * 1024 * 1024
+MAX_BYTES = 32 * 1024 * 1024
 
 
 class VerificationError(RuntimeError):
@@ -57,37 +80,48 @@ def checked_relative(path: str) -> PurePosixPath:
     return relative
 
 
-def source_files() -> dict[str, dict[str, Any]]:
-    require(SOURCE_ROOT.is_dir(), f"missing retired source: {SOURCE_ROOT}")
-    require(not SOURCE_ROOT.is_symlink(), "retired source root must not be a symlink")
+def inventory_files(
+    root: Path,
+    *,
+    label: str,
+) -> dict[str, dict[str, Any]]:
+    require(root.is_dir(), f"missing {label}: {root}")
+    require(not root.is_symlink(), f"{label} root must not be a symlink")
     files: dict[str, dict[str, Any]] = {}
     total_bytes = 0
-    for path in sorted(SOURCE_ROOT.rglob("*")):
-        require(not path.is_symlink(), f"symlink forbidden in retired source: {path}")
+    for path in sorted(root.rglob("*")):
+        require(not path.is_symlink(), f"symlink forbidden in {label}: {path}")
         if path.is_dir():
             continue
-        require(path.is_file(), f"special file forbidden in retired source: {path}")
-        relative = path.relative_to(SOURCE_ROOT).as_posix()
+        require(path.is_file(), f"special file forbidden in {label}: {path}")
+        relative = path.relative_to(root).as_posix()
         checked_relative(relative)
         payload = path.read_bytes()
         total_bytes += len(payload)
-        require(total_bytes <= MAX_BYTES, "retired source exceeds byte limit")
+        require(total_bytes <= MAX_BYTES, f"{label} exceeds byte limit")
         files[relative] = {
             "bytes": len(payload),
             "sha256": sha256(payload),
         }
-        require(len(files) <= MAX_FILES, "retired source exceeds file limit")
-    require(bool(files), "retired source is empty")
+        require(len(files) <= MAX_FILES, f"{label} exceeds file limit")
+    require(bool(files), f"{label} is empty")
     return files
+
+
+def source_files() -> dict[str, dict[str, Any]]:
+    return inventory_files(SOURCE_ROOT, label="retired source")
+
+
+def support_files() -> dict[str, dict[str, Any]]:
+    return inventory_files(SUPPORT_ROOT, label="retired support closure")
+
+
+def line_count(root: Path, files: dict[str, dict[str, Any]]) -> int:
+    return sum((root / relative).read_bytes().count(b"\n") for relative in files)
 
 
 def manifest_for(files: dict[str, dict[str, Any]]) -> dict[str, Any]:
     tree_payload = canonical_json(files)
-    line_count = 0
-    for relative in files:
-        payload = (SOURCE_ROOT / relative).read_bytes()
-        # Match `wc -l`, which is how roadmap LOC estimates are recorded.
-        line_count += payload.count(b"\n")
     return {
         "schema": SCHEMA,
         "source": {
@@ -98,20 +132,39 @@ def manifest_for(files: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "inventory": {
             "file_count": len(files),
             "byte_count": sum(entry["bytes"] for entry in files.values()),
-            "line_count": line_count,
+            # Match `wc -l`, which is how roadmap LOC estimates are recorded.
+            "line_count": line_count(SOURCE_ROOT, files),
             "tree_sha256": sha256(tree_payload),
             "files": files,
         },
     }
 
 
-def load_manifest() -> dict[str, Any]:
-    require(MANIFEST_PATH.is_file(), f"missing manifest: {MANIFEST_PATH}")
+def support_manifest_for(files: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "schema": SUPPORT_SCHEMA,
+        "source": {
+            "repository": SOURCE_REPOSITORY,
+            "revision": SUPPORT_REVISION,
+            "paths": list(SUPPORT_PATHS),
+        },
+        "inventory": {
+            "file_count": len(files),
+            "byte_count": sum(entry["bytes"] for entry in files.values()),
+            "line_count": line_count(SUPPORT_ROOT, files),
+            "tree_sha256": sha256(canonical_json(files)),
+            "files": files,
+        },
+    }
+
+
+def load_manifest(path: Path, *, label: str) -> dict[str, Any]:
+    require(path.is_file(), f"missing {label} manifest: {path}")
     try:
-        value = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise VerificationError(f"invalid manifest: {error}") from error
-    require(isinstance(value, dict), "manifest root must be an object")
+        raise VerificationError(f"invalid {label} manifest: {error}") from error
+    require(isinstance(value, dict), f"{label} manifest root must be an object")
     return value
 
 
@@ -172,7 +225,48 @@ def verify_source_repo(
         require(sha256(payload) == entry["sha256"], f"source hash differs: {relative}")
 
 
-def verify(source_repo: Path | None) -> dict[str, Any]:
+def verify_support_repo(
+    repo: Path,
+    files: dict[str, dict[str, Any]],
+) -> None:
+    completed = subprocess.run(
+        [
+            "git",
+            "ls-tree",
+            "-r",
+            "--name-only",
+            SUPPORT_REVISION,
+            "--",
+            *SUPPORT_PATHS,
+        ],
+        cwd=repo,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise VerificationError(
+            f"cannot inspect support revision: {completed.stderr.strip()}"
+        )
+    source_paths = sorted(completed.stdout.splitlines())
+    require(
+        source_paths == sorted(files),
+        "retired support inventory differs from originating revision",
+    )
+    for relative, entry in files.items():
+        payload = git_bytes(repo, SUPPORT_REVISION, relative)
+        require(
+            len(payload) == entry["bytes"],
+            f"support byte count differs: {relative}",
+        )
+        require(
+            sha256(payload) == entry["sha256"],
+            f"support hash differs: {relative}",
+        )
+
+
+def verify(source_repo: Path | None) -> dict[str, dict[str, Any]]:
     for name in FORBIDDEN_PACKAGING:
         require(
             not (RETIREMENT_ROOT / name).exists(),
@@ -180,13 +274,26 @@ def verify(source_repo: Path | None) -> dict[str, Any]:
         )
     actual_files = source_files()
     expected = manifest_for(actual_files)
-    manifest = load_manifest()
+    manifest = load_manifest(MANIFEST_PATH, label="source")
     require(manifest == expected, "retired source manifest or source bytes drifted")
     require(expected["inventory"]["file_count"] == 65, "unexpected source file count")
     require(expected["inventory"]["line_count"] == 20_101, "unexpected source line count")
+    actual_support = support_files()
+    expected_support = support_manifest_for(actual_support)
+    support_manifest = load_manifest(SUPPORT_MANIFEST_PATH, label="support")
+    require(
+        support_manifest == expected_support,
+        "retired support manifest or support bytes drifted",
+    )
+    require(
+        expected_support["inventory"]["file_count"] == 90,
+        "unexpected support file count",
+    )
     if source_repo is not None:
-        verify_source_repo(source_repo.resolve(), actual_files)
-    return expected
+        source_repo = source_repo.resolve()
+        verify_source_repo(source_repo, actual_files)
+        verify_support_repo(source_repo, actual_support)
+    return {"source": expected, "support": expected_support}
 
 
 def main() -> int:
@@ -199,21 +306,25 @@ def main() -> int:
     parser.add_argument(
         "--write-manifest",
         action="store_true",
-        help="write canonical manifest from the local snapshot before verification",
+        help="write canonical source and support manifests before verification",
     )
     args = parser.parse_args()
     try:
         if args.write_manifest:
             MANIFEST_PATH.write_bytes(canonical_json(manifest_for(source_files())))
+            SUPPORT_MANIFEST_PATH.write_bytes(
+                canonical_json(support_manifest_for(support_files()))
+            )
         result = verify(args.source_repo)
     except VerificationError as error:
         print(f"retired-python-codec: FAIL: {error}", file=sys.stderr)
         return 1
     print(
         "retired-python-codec: PASS "
-        f"files={result['inventory']['file_count']} "
-        f"bytes={result['inventory']['byte_count']} "
-        f"tree_sha256={result['inventory']['tree_sha256']}"
+        f"source_files={result['source']['inventory']['file_count']} "
+        f"support_files={result['support']['inventory']['file_count']} "
+        f"source_tree_sha256={result['source']['inventory']['tree_sha256']} "
+        f"support_tree_sha256={result['support']['inventory']['tree_sha256']}"
     )
     return 0
 
