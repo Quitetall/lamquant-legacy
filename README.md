@@ -4,6 +4,19 @@ Optional, process-isolated adapters for retired LamQuant wire formats. This
 repository is not a library dependency of ABIR, BLUT, firmware, training, or
 the main LamQuant runtime.
 
+## Retired Rust composition API
+
+`lamquant-stage-pass-legacy` preserves the exact final public
+`Stage`/`Pass`/pipeline-DSL/codec-stage API from LamQuant Lossless revision
+`db7ff36aff529886195e067ea9628d3e7a08cd84`. It is a compatibility facade over
+that immutable source revision, not a second implementation. Migration tools
+may link it in their isolated process; current LamQuant code must use validated
+ABIR Nodes, kernels, compiled plans, and execution receipts instead.
+
+The facade is tested as part of this workspace and is intentionally
+`publish = false`. It exists to keep historical source consumers recoverable
+without retaining the superseded abstraction in the main dependency graph.
+
 The adapter provides bounded inspection and exact, non-destructive forensic
 conversion for every retired profile. BCS1, LML1, and LQTP1 additionally
 support a bounded `import-semantic` process operation. That operation decodes

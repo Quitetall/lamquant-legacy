@@ -6,22 +6,20 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 
-def git(*args: str) -> str:
+def git(*args: str, repo: str | None = None) -> str:
     return subprocess.run(
-        ["git", *args], check=True, text=True, stdout=subprocess.PIPE
+        ["git", *args],
+        cwd=repo,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
     ).stdout
 
 
-def check(commit: str) -> None:
-    message = git("show", "-s", "--format=%B", commit)
-    changed = {
-        line.split("\t")[-1]
-        for line in git("diff-tree", "--root", "--no-commit-id", "--name-status", "-r", commit)
-        .splitlines()
-        if line
-    }
+def check_message(message: str, changed: set[str]) -> None:
     assisted = []
     contributions: dict[str, dict[str, object]] = {}
     for line in message.splitlines():
@@ -44,10 +42,45 @@ def check(commit: str) -> None:
             raise SystemExit(f"incomplete File-Contribution for {path}")
 
 
+def check(commit: str, repo: str | None = None) -> None:
+    message = git("show", "-s", "--format=%B", commit, repo=repo)
+    changed = {
+        line.split("\t")[-1]
+        for line in git(
+            "diff-tree",
+            "--root",
+            "--no-commit-id",
+            "--name-status",
+            "-r",
+            commit,
+            repo=repo,
+        ).splitlines()
+        if line
+    }
+    check_message(message, changed)
+
+
+def check_staged(message_path: str, repo: str) -> None:
+    message = Path(message_path).read_text(encoding="utf-8")
+    changed = {
+        line.split("\t")[-1]
+        for line in git("diff", "--cached", "--name-status", "--no-renames", repo=repo).splitlines()
+        if line
+    }
+    check_message(message, changed)
+
+
 def main() -> None:
-    if len(sys.argv) != 2:
-        raise SystemExit("usage: check_commit_provenance.py COMMIT")
-    check(sys.argv[1])
+    if len(sys.argv) == 2:
+        check(sys.argv[1])
+        return
+    if len(sys.argv) == 5 and sys.argv[1] == "--repo" and sys.argv[3] == "staged":
+        check_staged(sys.argv[4], sys.argv[2])
+        return
+    raise SystemExit(
+        "usage: check_commit_provenance.py COMMIT | "
+        "--repo REPO staged COMMIT_MESSAGE"
+    )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,12 @@
+[package]
+name = "lamquant-stage-pass-legacy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Process-isolated facade for LamQuant's retired Stage and Pass API"
+
+[dependencies]
+lamquant-lml-archive.workspace = true
