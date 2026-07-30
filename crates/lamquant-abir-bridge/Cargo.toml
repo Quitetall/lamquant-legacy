@@ -9,6 +9,6 @@ publish = true
 
 [dependencies]
 legacy-ir = { package = "lamquant-legacy-ir", version = "=0.1.1", path = "../lamquant-legacy-ir", default-features = false }
-"semantic-abir" = { package = "abir", version = "=0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "4083198d644fb8bcb98df71cd830bf46a59fca45", default-features = false, features = ["alloc"] }
+"semantic-abir" = { package = "abir", version = "=0.1.0", git = "https://github.com/Quitetall/ABIR.git", rev = "6aae536ec9e5491338be20f17b6f8ce6a7efd28e", default-features = false, features = ["alloc"] }
 blake3 = { workspace = true, default-features = false }
 bytemuck.workspace = true

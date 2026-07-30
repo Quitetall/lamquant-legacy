@@ -31,16 +31,16 @@ license = "AGPL-3.0-or-later"
 repository = "https://github.com/Quitetall/lamquant-legacy"
 
 [workspace.dependencies]
-abir = { git = "https://github.com/Quitetall/ABIR.git", rev = "4083198d644fb8bcb98df71cd830bf46a59fca45", version = "=0.1.0" }
-abir-adapter = { git = "https://github.com/Quitetall/ABIR.git", rev = "4083198d644fb8bcb98df71cd830bf46a59fca45", version = "=0.1.0" }
+abir = { git = "https://github.com/Quitetall/ABIR.git", rev = "6aae536ec9e5491338be20f17b6f8ce6a7efd28e", version = "=0.1.0" }
+abir-adapter = { git = "https://github.com/Quitetall/ABIR.git", rev = "6aae536ec9e5491338be20f17b6f8ce6a7efd28e", version = "=0.1.0" }
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 blake3 = { version = "=1.5.5", default-features = false }
 bytemuck = "=1.25.0"
 lamquant-legacy-ir = { path = "crates/lamquant-legacy-ir", version = "=0.1.1" }
 lamquant-lml-legacy = { path = "crates/lamquant-lml-legacy", version = "=0.1.1", default-features = false, features = ["legacy-decode", "legacy-encode", "legacy-tensor-pack"] }
-lamquant-lml-desktop = { git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "db7ff36aff529886195e067ea9628d3e7a08cd84", version = "=0.9.3", features = ["fast"] }
-lamquant-lml-mcu = { git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "db7ff36aff529886195e067ea9628d3e7a08cd84", version = "=0.9.3", default-features = false, features = ["std"] }
-lamquant-lml-archive = { package = "lamquant-lml", git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "db7ff36aff529886195e067ea9628d3e7a08cd84", version = "=0.9.3", default-features = false, features = ["std", "archive"] }
+lamquant-lml-desktop = { git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "f9b915466e67a87ad8d290a9793d349df250c9fb", version = "=0.9.3", features = ["fast"] }
+lamquant-lml-mcu = { git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "f9b915466e67a87ad8d290a9793d349df250c9fb", version = "=0.9.3", default-features = false, features = ["std"] }
+lamquant-lml-archive = { package = "lamquant-lml", git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "f9b915466e67a87ad8d290a9793d349df250c9fb", version = "=0.9.3", default-features = false, features = ["std", "archive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = { version = "0.10", default-features = false }
