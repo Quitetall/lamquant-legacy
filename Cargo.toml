@@ -6,6 +6,7 @@ members = [
     "crates/lamquant-legacy-ir",
     "crates/lamquant-lml-legacy",
     "crates/lamquant-stage-pass-legacy",
+    "crates/lamquant-runtime-legacy",
 ]
 # The ABIR bridge is experimental (ADR 0139/0140): in `members` so it shares the
 # lock + is fmt/clippy/test-gated by semantic-core, but OUT of `default-members`
@@ -15,6 +16,7 @@ default-members = [
     "crates/lamquant-legacy-ir",
     "crates/lamquant-lml-legacy",
     "crates/lamquant-stage-pass-legacy",
+    "crates/lamquant-runtime-legacy",
 ]
 
 [workspace.package]

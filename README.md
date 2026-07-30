@@ -17,6 +17,26 @@ The facade is tested as part of this workspace and is intentionally
 `publish = false`. It exists to keep historical source consumers recoverable
 without retaining the superseded abstraction in the main dependency graph.
 
+## Retired runtime object model
+
+`lamquant-runtime-legacy` preserves the final `Source`, `Sink`, and
+`WindowBatch` object family, its nine concrete implementations, manifest
+engine, daemon, and control CLI from LamQuant revision
+`93119e4e25402b2c27a15518f1d2399a98990257`. Its codec and LSL dependencies
+are pinned to exact compatible source revisions. Features remain opt-in and
+the package is `publish = false`.
+
+The copy records that source snapshot, then applies three bounded safety
+repairs: stream-layout changes fail without mutating buffered signal, every
+manifest is constructed before any pipeline task starts, and the daemon never
+replaces or cleans up a control path it did not create. These repairs preserve
+compatibility behavior while preventing inherited panic, task-leak, and
+destructive-path failure modes.
+
+Current LamQuant execution uses capability-driven ABIR Nodes, compiled plans,
+implementation-bound kernels, and transactional receipts. Compatibility tools
+may run the retired runtime in isolation; mainline code must not depend on it.
+
 The adapter provides bounded inspection and exact, non-destructive forensic
 conversion for every retired profile. BCS1, LML1, and LQTP1 additionally
 support a bounded `import-semantic` process operation. That operation decodes
