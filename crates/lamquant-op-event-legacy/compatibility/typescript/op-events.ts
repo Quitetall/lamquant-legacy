@@ -4,7 +4,7 @@
 // schema is small (six variants, ≤8 fields total) and pulling in
 // json-schema-to-typescript as an npm prebuild step adds CI friction
 // without a meaningful win at this size. The schema parity test in
-// crates/lamquant-ops/tests/schema_parity.rs still pins the wire format,
+// tests/schema_parity.rs in this compatibility crate still pins the wire format,
 // and we exercise this TS file via a tiny round-trip check
 // (gui/scripts/check-op-events.mjs) that the Rust test invokes.
 
@@ -44,6 +44,14 @@ export interface OpEventFileDone extends OpEventBase {
   ms: number;
   /** Compression ratio (output_bytes / input_bytes). Null when not applicable. */
   cr?: number | null;
+  bytes_in?: number | null;
+  bytes_out?: number | null;
+  samples?: number | null;
+  duration_s?: number | null;
+  n_channels?: number | null;
+  sample_rate?: number | null;
+  sha256?: string | null;
+  n_windows?: number | null;
 }
 
 export interface OpEventDone extends OpEventBase {

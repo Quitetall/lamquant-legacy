@@ -1,7 +1,10 @@
-//! Shared op-runner contract for all three LamQuant front-ends.
+//! Frozen compatibility copy of LamQuant's retired operation-event contract.
 //!
-//! Every long-running operation flows through this crate. Consumers vary
-//! by lifetime model:
+//! This non-publishable crate preserves the final wire format and implementation
+//! for forensic conversion and compatibility tooling. Production LamQuant
+//! front-ends use compiler-issued plan projections instead.
+//!
+//! Historical consumers varied by lifetime model:
 //!
 //!   - **Rust TUI** runs the runner in-process. It uses `MpscSink` so the
 //!     main loop can drain `OpEvent`s from an `mpsc::Receiver` each tick.

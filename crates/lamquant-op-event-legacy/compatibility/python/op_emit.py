@@ -3,7 +3,7 @@ Op-event emitter — Python side of the LamQuant op contract.
 
 Wire format is the canonical JSON Schema at ``specs/op-events.schema.json``.
 Rust, Python, and TS all consume the same shape; drift is caught by
-``crates/lamquant-ops/tests/schema_parity.rs``.
+``tests/schema_parity.rs`` in this compatibility crate.
 
 Python is **both** a producer and a consumer of OpEvents:
 
@@ -31,6 +31,7 @@ import json
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Iterable, Optional
 
 
@@ -172,6 +173,14 @@ class OpEvent:
     success: Optional[bool] = None
     cr: Optional[float] = None
     ms: Optional[int] = None
+    bytes_in: Optional[int] = None
+    bytes_out: Optional[int] = None
+    samples: Optional[int] = None
+    duration_s: Optional[float] = None
+    n_channels: Optional[int] = None
+    sample_rate: Optional[float] = None
+    sha256: Optional[str] = None
+    n_windows: Optional[int] = None
     raw: dict = field(default_factory=dict)
 
 
@@ -205,6 +214,14 @@ def parse_line(line: str) -> OpEvent:
         success=data.get("success"),
         cr=data.get("cr"),
         ms=data.get("ms"),
+        bytes_in=data.get("bytes_in"),
+        bytes_out=data.get("bytes_out"),
+        samples=data.get("samples"),
+        duration_s=data.get("duration_s"),
+        n_channels=data.get("n_channels"),
+        sample_rate=data.get("sample_rate"),
+        sha256=data.get("sha256"),
+        n_windows=data.get("n_windows"),
         raw=data,
     )
 
@@ -230,15 +247,15 @@ def parse_lines(stream: Iterable[str]) -> Iterable[OpEvent]:
 # ── CLI / self-test (--check) ─────────────────────────────────────────────
 
 def _check_round_trip() -> int:
-    """Self-test entry point used by ``crates/lamquant-ops/tests/schema_parity.rs``.
+    """Self-test entry point for the sequestered compatibility fixture.
 
     Reads the canonical fixture, asserts every line round-trips through
     :func:`parse_line` cleanly, then re-emits identical JSON lines so a
     Rust-side diff can confirm the wire format is byte-stable across
     languages. Returns 0 on success, 1 on any drift.
     """
-    from lamquant_codec._paths import REPO_ROOT as here
-    fixture = here / "crates" / "lamquant-ops" / "tests" / "fixtures" / "op-events-sample.jsonl"
+    crate_root = Path(__file__).resolve().parents[2]
+    fixture = crate_root / "tests" / "fixtures" / "op-events-sample.jsonl"
     if not fixture.exists():
         print(f"fixture not found: {fixture}", file=sys.stderr)
         return 1
