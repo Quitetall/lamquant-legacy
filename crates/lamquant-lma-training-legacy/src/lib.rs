@@ -66,6 +66,7 @@ const DEPENDENCY_PREFLIGHT: &str = concat!(
 const MAX_GIT_TEXT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_EXECUTABLE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_VENV_CONFIG_BYTES: u64 = 64 * 1024;
 const MAX_PREFLIGHT_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_WORKSPACE_VALIDATION_ENTRIES: usize = 100_000;
 const MAX_WORKSPACE_VALIDATION_DEPTH: usize = 64;
@@ -1554,6 +1555,18 @@ fn validate_environment(environment: &[LegacyEnvironment]) -> Result<(), LaunchE
 }
 
 #[derive(Debug)]
+struct ValidatedPythonEnvironment {
+    invocation_root: PathBuf,
+    target_root: PathBuf,
+    target_device: u64,
+    target_inode: u64,
+    config_device: u64,
+    config_inode: u64,
+    config_sha256: String,
+    root: fs::File,
+}
+
+#[derive(Debug)]
 struct ValidatedPythonInterpreter {
     invocation: PathBuf,
     target: PathBuf,
@@ -1561,6 +1574,7 @@ struct ValidatedPythonInterpreter {
     target_inode: u64,
     target_sha256: String,
     sealed_image: fs::File,
+    environment: Option<ValidatedPythonEnvironment>,
 }
 
 #[derive(Debug)]
@@ -1716,6 +1730,10 @@ impl ValidatedPythonInterpreter {
         self.sealed_image.as_raw_fd()
     }
 
+    fn environment(&self) -> Option<&ValidatedPythonEnvironment> {
+        self.environment.as_ref()
+    }
+
     fn direct_command(&self) -> Command {
         let fd = self.sealed_fd();
         let mut command = Command::new(format!("/proc/self/fd/{fd}"));
@@ -1790,8 +1808,206 @@ impl ValidatedPythonInterpreter {
                 "sealed Python image content changed".to_owned(),
             ));
         }
+        if let Some(environment) = &self.environment {
+            environment.revalidate()?;
+        }
         Ok(())
     }
+}
+
+impl ValidatedPythonEnvironment {
+    fn root_fd(&self) -> libc::c_int {
+        self.root.as_raw_fd()
+    }
+
+    fn invocation_root(&self) -> &Path {
+        &self.invocation_root
+    }
+
+    fn revalidate(&self) -> Result<(), LaunchError> {
+        let target_root = self.invocation_root.canonicalize().map_err(|error| {
+            LaunchError::InvalidPythonInterpreter(format!(
+                "canonicalize Python environment {}: {error}",
+                self.invocation_root.display()
+            ))
+        })?;
+        if target_root != self.target_root {
+            return Err(LaunchError::InvalidPythonInterpreter(format!(
+                "Python environment target changed: {}",
+                self.invocation_root.display()
+            )));
+        }
+        let root = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(&target_root)
+            .map_err(|error| {
+                LaunchError::InvalidPythonInterpreter(format!(
+                    "open Python environment {}: {error}",
+                    target_root.display()
+                ))
+            })?;
+        let root_metadata = root.metadata().map_err(|error| {
+            LaunchError::InvalidPythonInterpreter(format!(
+                "inspect Python environment {}: {error}",
+                target_root.display()
+            ))
+        })?;
+        let held_metadata = self.root.metadata().map_err(|error| {
+            LaunchError::InvalidPythonInterpreter(format!(
+                "inspect held Python environment {}: {error}",
+                target_root.display()
+            ))
+        })?;
+        if !root_metadata.is_dir()
+            || root_metadata.dev() != self.target_device
+            || root_metadata.ino() != self.target_inode
+            || held_metadata.dev() != self.target_device
+            || held_metadata.ino() != self.target_inode
+        {
+            return Err(LaunchError::InvalidPythonInterpreter(format!(
+                "Python environment identity changed: {}",
+                target_root.display()
+            )));
+        }
+
+        let config = self.invocation_root.join("pyvenv.cfg");
+        let mut config_file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&config)
+            .map_err(|error| {
+                LaunchError::InvalidPythonInterpreter(format!(
+                    "open Python environment config {}: {error}",
+                    config.display()
+                ))
+            })?;
+        let metadata = config_file.metadata().map_err(|error| {
+            LaunchError::InvalidPythonInterpreter(format!(
+                "inspect Python environment config {}: {error}",
+                config.display()
+            ))
+        })?;
+        if !metadata.is_file()
+            || metadata.len() == 0
+            || metadata.len() > MAX_VENV_CONFIG_BYTES
+            || metadata.dev() != self.config_device
+            || metadata.ino() != self.config_inode
+        {
+            return Err(LaunchError::InvalidPythonInterpreter(format!(
+                "Python environment config identity changed: {}",
+                config.display()
+            )));
+        }
+        let sha256 = file_sha256_from(&mut config_file).map_err(|error| {
+            LaunchError::InvalidPythonInterpreter(format!(
+                "hash Python environment config {}: {error}",
+                config.display()
+            ))
+        })?;
+        if sha256 != self.config_sha256 {
+            return Err(LaunchError::InvalidPythonInterpreter(format!(
+                "Python environment config changed: {}",
+                config.display()
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn validate_python_environment(
+    requested: &Path,
+) -> Result<Option<ValidatedPythonEnvironment>, LaunchError> {
+    let parent = requested.parent();
+    let roots = [parent, parent.and_then(Path::parent)];
+    for root in roots.into_iter().flatten() {
+        let config = root.join("pyvenv.cfg");
+        let link_metadata = match config.symlink_metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(LaunchError::InvalidPythonInterpreter(format!(
+                    "inspect Python environment config {}: {error}",
+                    config.display()
+                )))
+            }
+        };
+        if link_metadata.file_type().is_symlink() || !link_metadata.is_file() {
+            return Err(LaunchError::InvalidPythonInterpreter(format!(
+                "Python environment config must be a regular non-symlink file: {}",
+                config.display()
+            )));
+        }
+        let target_root = root.canonicalize().map_err(|error| {
+            LaunchError::InvalidPythonInterpreter(format!(
+                "canonicalize Python environment {}: {error}",
+                root.display()
+            ))
+        })?;
+        let root_file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(&target_root)
+            .map_err(|error| {
+                LaunchError::InvalidPythonInterpreter(format!(
+                    "open Python environment {}: {error}",
+                    target_root.display()
+                ))
+            })?;
+        let root_metadata = root_file.metadata().map_err(|error| {
+            LaunchError::InvalidPythonInterpreter(format!(
+                "inspect Python environment {}: {error}",
+                target_root.display()
+            ))
+        })?;
+        if !root_metadata.is_dir() {
+            return Err(LaunchError::InvalidPythonInterpreter(format!(
+                "Python environment root is not a directory: {}",
+                target_root.display()
+            )));
+        }
+        let mut config_file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&config)
+            .map_err(|error| {
+                LaunchError::InvalidPythonInterpreter(format!(
+                    "open Python environment config {}: {error}",
+                    config.display()
+                ))
+            })?;
+        let config_metadata = config_file.metadata().map_err(|error| {
+            LaunchError::InvalidPythonInterpreter(format!(
+                "inspect Python environment config {}: {error}",
+                config.display()
+            ))
+        })?;
+        if config_metadata.len() == 0 || config_metadata.len() > MAX_VENV_CONFIG_BYTES {
+            return Err(LaunchError::InvalidPythonInterpreter(format!(
+                "Python environment config exceeds size limit: {}",
+                config.display()
+            )));
+        }
+        let config_sha256 = file_sha256_from(&mut config_file).map_err(|error| {
+            LaunchError::InvalidPythonInterpreter(format!(
+                "hash Python environment config {}: {error}",
+                config.display()
+            ))
+        })?;
+        let environment = ValidatedPythonEnvironment {
+            invocation_root: root.to_owned(),
+            target_root,
+            target_device: root_metadata.dev(),
+            target_inode: root_metadata.ino(),
+            config_device: config_metadata.dev(),
+            config_inode: config_metadata.ino(),
+            config_sha256,
+            root: root_file,
+        };
+        environment.revalidate()?;
+        return Ok(Some(environment));
+    }
+    Ok(None)
 }
 
 fn inherit_fd_across_exec(command: &mut Command, fd: libc::c_int) {
@@ -1916,6 +2132,7 @@ fn validate_python_interpreter(python: &OsStr) -> Result<ValidatedPythonInterpre
                 canonical.display()
             ))
         })?;
+    let environment = validate_python_environment(requested)?;
     let validated = ValidatedPythonInterpreter {
         invocation: requested.to_owned(),
         target: canonical.clone(),
@@ -1923,6 +2140,7 @@ fn validate_python_interpreter(python: &OsStr) -> Result<ValidatedPythonInterpre
         target_inode,
         target_sha256,
         sealed_image,
+        environment,
     };
     validated.revalidate()?;
     // Execute immutable bytes while preserving the operator-supplied argv[0],
@@ -3285,7 +3503,16 @@ fn isolated_python_command(
         .args(["--dev-bind", "/dev", "/dev"])
         .args(["--proc", "/proc"])
         .args(["--tmpfs", "/tmp"])
-        .args(["--tmpfs", "/dev/shm"])
+        .args(["--tmpfs", "/dev/shm"]);
+    if let Some(environment) = python.environment() {
+        let root_fd = environment.root_fd();
+        inherit_fd_across_exec(&mut command, root_fd);
+        command
+            .arg("--ro-bind-fd")
+            .arg(root_fd.to_string())
+            .arg(environment.invocation_root());
+    }
+    command
         .args(["--perms", "0500"])
         .arg("--ro-bind-data")
         .arg(python_fd.to_string())
@@ -4113,7 +4340,7 @@ mod tests {
             "if __name__ == '__main__':\n",
             "    if os.fork() == 0:\n",
             "        os.setsid()\n",
-            "        time.sleep(2)\n",
+            "        time.sleep(0.3)\n",
             "        workspace = pathlib.Path(os.environ['LAMQUANT_LEGACY_WORKSPACE'])\n",
             "        (workspace / 'artifacts/detached-escaped').write_text('BAD')\n",
             "        os._exit(0)\n",
@@ -4125,7 +4352,6 @@ mod tests {
                 .expect("verify detached-child fixture");
         let parent = tempfile::tempdir().expect("workspace parent");
         let workspace = parent.path().join("legacy-workspace");
-        let started = Instant::now();
 
         let status = launch_verified_at(
             &verified,
@@ -4138,8 +4364,7 @@ mod tests {
         .expect("launch detached-child fixture");
 
         assert!(status.success());
-        assert!(started.elapsed() < Duration::from_secs(2));
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(500));
         assert!(!workspace.join("artifacts/detached-escaped").exists());
     }
 
@@ -4387,7 +4612,7 @@ mod tests {
     fn real_venv_interpreter_keeps_venv_site_packages_during_launch() {
         let venv_parent = tempfile::Builder::new()
             .prefix(".lamquant-venv-test-")
-            .tempdir_in(std::env::current_dir().expect("current directory"))
+            .tempdir()
             .expect("venv parent");
         let venv = venv_parent.path().join("venv");
         let status = Command::new(absolute_python())
@@ -4544,6 +4769,7 @@ mod tests {
             target_sha256,
             invocation: python,
             sealed_image,
+            environment: None,
         };
         let sandbox = validate_sandbox_executable().expect("validate sandbox");
         let sender = signal_when_ready(workspace_path.join("artifacts/dependency-signal.ready"));
