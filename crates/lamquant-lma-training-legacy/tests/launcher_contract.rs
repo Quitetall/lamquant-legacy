@@ -37,7 +37,6 @@ fn source_and_trainer_allowlist_are_frozen() {
                 "train_l3_teacher",
                 "python/lamquant/oracle/train_l3_teacher.py"
             ),
-            ("train_teacher", "python/lamquant/oracle/train_teacher.py"),
             (
                 "train_vocos_decoder",
                 "python/lamquant/decoder/train_vocos_decoder.py"
@@ -147,6 +146,13 @@ fn cli_exits_with_signal_status_when_git_handshake_is_interrupted() {
         .args(["--trainer", "train_joint", "--python", "/usr/bin/python3"])
         .args(["--workspace"])
         .arg(&workspace)
+        .args([
+            "--",
+            "--lma-root",
+            "/archive/lma",
+            "--split-manifest",
+            "/archive/split.json",
+        ])
         .spawn()
         .expect("spawn legacy CLI");
     let deadline = Instant::now() + Duration::from_secs(5);

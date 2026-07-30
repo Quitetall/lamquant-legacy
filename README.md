@@ -39,7 +39,7 @@ may run the retired runtime in isolation; mainline code must not depend on it.
 
 ## Retired LMA-direct training
 
-`lamquant-lma-training-legacy` preserves access to the eight final LMA-direct
+`lamquant-lma-training-legacy` preserves access to the seven final LMA-direct
 trainer entrypoints from `blut-lamquant` revision
 `64d4478deb2ea52193b9d9b108e9c46793701687`. It does not vendor or fetch
 trainer source. An operator supplies an existing checkout; the launcher
@@ -109,7 +109,10 @@ remaining sandbox. Signals received during Git verification, Python handshake,
 or dependency preflight retain typed interruption state and make the CLI exit
 with `128 + signal`. Linux children carry a parent-death signal. Every
 `--training-*` ABIR snapshot option and its argparse abbreviations are rejected:
-this tool executes only the retired LMA-direct branch. Duplicate or abbreviated
+this tool executes only the retired LMA-direct branch. Every invocation requires
+exactly one `--lma-root` and `--split-manifest`. The NPZ/memmap-only
+`train_teacher` entrypoint is intentionally outside the rollback allowlist.
+Duplicate or abbreviated
 dependency-affecting options are rejected. Supported hosts are Linux systems
 with `/usr/bin/bwrap`.
 
@@ -132,7 +135,7 @@ cargo run -p lamquant-lma-training-legacy -- \
 Current BLUT production recipes accept governed ABIR Training Snapshots only.
 This launcher is process-isolated rollback tooling and emits no promotable
 checkpoint attestation. `--help` prints launcher syntax; `--list-trainers`
-prints the closed eight-entry allowlist.
+prints the closed seven-entry allowlist.
 
 ## Retired operation-event protocol
 

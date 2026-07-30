@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -65,6 +65,7 @@ const DEPENDENCY_PREFLIGHT: &str = concat!(
 );
 const MAX_GIT_TEXT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_EXECUTABLE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_PREFLIGHT_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_WORKSPACE_VALIDATION_ENTRIES: usize = 100_000;
 const MAX_WORKSPACE_VALIDATION_DEPTH: usize = 64;
@@ -78,6 +79,7 @@ const SOURCE_MANIFEST: &str = "source-projection-v1.manifest";
 const WORKSPACE_BINDING: &str = "workspace-binding-v1.manifest";
 const DEPENDENCY_REPORT: &str = "dependency-preflight-v1.txt";
 const SANDBOX_EXECUTABLE: &str = "/usr/bin/bwrap";
+const PINNED_PYTHON_EXECUTABLE: &str = "/tmp/lamquant-legacy-python";
 const IMPORTABLE_EXTENSIONS: [&str; 5] = ["py", "pyi", "pyc", "pyo", "so"];
 static ACTIVE_CHILD_PROCESS_GROUP: AtomicI32 = AtomicI32::new(0);
 static PENDING_TERMINATION_SIGNAL: AtomicI32 = AtomicI32::new(0);
@@ -212,19 +214,17 @@ pub enum LegacyTrainer {
     TrainCombined,
     TrainJoint,
     TrainL3Teacher,
-    TrainTeacher,
     TrainVocosDecoder,
 }
 
 impl LegacyTrainer {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 7] = [
         Self::PretrainMae,
         Self::PretrainSslTueg,
         Self::Train4StateController,
         Self::TrainCombined,
         Self::TrainJoint,
         Self::TrainL3Teacher,
-        Self::TrainTeacher,
         Self::TrainVocosDecoder,
     ];
 
@@ -236,7 +236,6 @@ impl LegacyTrainer {
             Self::TrainCombined => "train_combined",
             Self::TrainJoint => "train_joint",
             Self::TrainL3Teacher => "train_l3_teacher",
-            Self::TrainTeacher => "train_teacher",
             Self::TrainVocosDecoder => "train_vocos_decoder",
         }
     }
@@ -249,7 +248,6 @@ impl LegacyTrainer {
             Self::TrainCombined => "python/lamquant/decoder/train_combined.py",
             Self::TrainJoint => "python/lamquant/student/train_joint.py",
             Self::TrainL3Teacher => "python/lamquant/oracle/train_l3_teacher.py",
-            Self::TrainTeacher => "python/lamquant/oracle/train_teacher.py",
             Self::TrainVocosDecoder => "python/lamquant/decoder/train_vocos_decoder.py",
         }
     }
@@ -271,7 +269,6 @@ impl LegacyTrainer {
             ],
             Self::TrainJoint => vec![artifacts, python.join("training_logs")],
             Self::TrainL3Teacher => vec![python.join("ai_models/oracle")],
-            Self::TrainTeacher => vec![workspace.join("run"), python.join("lamquant/oracle")],
             Self::TrainVocosDecoder => vec![python.join("ai_models/decoder")],
         }
     }
@@ -336,21 +333,12 @@ impl LegacyTrainer {
                 "training_diagnostics",
             ],
             Self::TrainL3Teacher => vec!["lamquant.ingredients"],
-            Self::TrainTeacher => vec![
-                "data_types",
-                "lamquant.ingredients",
-                "lamquant_neural.models.encoder",
-                "streaming_dataset",
-            ],
             Self::TrainVocosDecoder => {
                 vec!["lamquant.ingredients", "lamquant_codec.training"]
             }
         };
         if argument_value(args, "--logger") == Some("wandb") {
             modules.push("wandb");
-        }
-        if self == Self::TrainTeacher && argument_value(args, "--logger") == Some("mlflow") {
-            modules.push("mlflow");
         }
         if self == Self::TrainJoint
             && argument_value(args, "--lr-schedule") == Some("schedule-free")
@@ -389,10 +377,7 @@ impl LegacyTrainer {
                 OsString::from("--resume-dir"),
                 artifacts.join("recovery").into_os_string(),
             ],
-            Self::TrainCombined
-            | Self::TrainL3Teacher
-            | Self::TrainTeacher
-            | Self::TrainVocosDecoder => Vec::new(),
+            Self::TrainCombined | Self::TrainL3Teacher | Self::TrainVocosDecoder => Vec::new(),
         }
     }
 
@@ -402,10 +387,7 @@ impl LegacyTrainer {
             Self::PretrainSslTueg => &["--out"],
             Self::Train4StateController => &["--checkpoint"],
             Self::TrainJoint => &["--ckpt-dir", "--resume-dir"],
-            Self::TrainCombined
-            | Self::TrainL3Teacher
-            | Self::TrainTeacher
-            | Self::TrainVocosDecoder => &[],
+            Self::TrainCombined | Self::TrainL3Teacher | Self::TrainVocosDecoder => &[],
         }
     }
 
@@ -422,7 +404,7 @@ impl LegacyTrainer {
             | Self::TrainJoint
             | Self::TrainL3Teacher
             | Self::TrainVocosDecoder => &["--lr"],
-            Self::TrainCombined | Self::TrainTeacher => &[],
+            Self::TrainCombined => &[],
         }
     }
 }
@@ -1262,6 +1244,8 @@ pub fn launch(
     environment: &[LegacyEnvironment],
     args: &[OsString],
 ) -> Result<ExitStatus, LaunchError> {
+    validate_legacy_arguments(trainer, args)?;
+    validate_environment(environment)?;
     let verified = verify_checkout(git, checkout, trainer)?;
     launch_verified(&verified, python, workspace, environment, args)
 }
@@ -1302,7 +1286,7 @@ fn launch_verified_at(
     validate_environment(environment)?;
 
     let python = validate_python_interpreter(python.as_ref())?;
-    validate_sandbox_executable()?;
+    let sandbox = validate_sandbox_executable()?;
     let workspace = FrozenWorkspace::open_or_create(&verified, workspace.as_ref())
         .map_err(map_workspace_error)?;
     let mut managed_args = verified.trainer().managed_arguments(workspace.root());
@@ -1315,14 +1299,17 @@ fn launch_verified_at(
     preflight_dependency_environment(
         &workspace,
         &verified,
+        &sandbox,
         &python,
         environment,
         dependency_modules,
     )?;
+    sandbox.revalidate()?;
     python.revalidate()?;
     let status = supervised_status(python_command(
         &workspace,
-        python.invocation(),
+        &sandbox,
+        &python,
         environment,
         &managed_args,
     ))
@@ -1344,7 +1331,9 @@ fn map_spawn_error(error: io::Error) -> LaunchError {
 
 fn validate_legacy_arguments(trainer: LegacyTrainer, args: &[OsString]) -> Result<(), LaunchError> {
     let dependency_flags = ["--logger", "--lr-schedule", "--target-source", "--dac-init"];
+    let required_input_flags = ["--lma-root", "--split-manifest"];
     let mut dependency_counts = BTreeMap::<&str, usize>::new();
+    let mut required_input_counts = BTreeMap::<&str, usize>::new();
     for argument in args {
         let Some(argument) = argument.to_str() else {
             continue;
@@ -1357,6 +1346,22 @@ fn validate_legacy_arguments(trainer: LegacyTrainer, args: &[OsString]) -> Resul
             return Err(LaunchError::InvalidArguments(format!(
                 "ABIR snapshot option {head:?} is forbidden in LMA-direct rollback mode"
             )));
+        }
+        for flag in required_input_flags {
+            if flag.starts_with(head) {
+                if head != flag {
+                    return Err(LaunchError::InvalidArguments(format!(
+                        "abbreviated LMA-direct input option {head:?} is forbidden; use {flag}"
+                    )));
+                }
+                let count = required_input_counts.entry(flag).or_default();
+                *count += 1;
+                if *count > 1 {
+                    return Err(LaunchError::InvalidArguments(format!(
+                        "duplicate LMA-direct input option {flag}"
+                    )));
+                }
+            }
         }
         let exact_prefix_option = trainer.exact_protected_prefix_options().contains(&head)
             || (trainer == LegacyTrainer::TrainJoint && head == "--resume");
@@ -1389,12 +1394,33 @@ fn validate_legacy_arguments(trainer: LegacyTrainer, args: &[OsString]) -> Resul
             }
         }
     }
+    for flag in required_input_flags {
+        if required_input_counts.get(flag) != Some(&1) || !argument_has_non_option_value(args, flag)
+        {
+            return Err(LaunchError::InvalidArguments(format!(
+                "{trainer} rollback requires exactly one {flag} with a non-empty value"
+            )));
+        }
+    }
     Ok(())
 }
 
-fn validate_sandbox_executable() -> Result<PathBuf, LaunchError> {
-    validate_absolute_executable(OsStr::new(SANDBOX_EXECUTABLE), "bubblewrap sandbox")
-        .map_err(LaunchError::InvalidSandbox)
+fn argument_has_non_option_value(args: &[OsString], flag: &str) -> bool {
+    args.iter().enumerate().any(|(index, argument)| {
+        let Some(argument) = argument.to_str() else {
+            return false;
+        };
+        if argument == flag {
+            return args
+                .get(index + 1)
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| !value.is_empty() && !value.starts_with("--"));
+        }
+        argument
+            .strip_prefix(flag)
+            .and_then(|tail| tail.strip_prefix('='))
+            .is_some_and(|value| !value.is_empty())
+    })
 }
 
 fn validate_managed_destinations(workspace: &FrozenWorkspace) -> Result<(), io::Error> {
@@ -1527,18 +1553,175 @@ fn validate_environment(environment: &[LegacyEnvironment]) -> Result<(), LaunchE
     Ok(())
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 struct ValidatedPythonInterpreter {
     invocation: PathBuf,
     target: PathBuf,
     target_device: u64,
     target_inode: u64,
     target_sha256: String,
+    sealed_image: fs::File,
+}
+
+#[derive(Debug)]
+struct ValidatedSandboxExecutable {
+    invocation: PathBuf,
+    target: PathBuf,
+    target_device: u64,
+    target_inode: u64,
+    target_sha256: String,
+    executable: fs::File,
+}
+
+impl ValidatedSandboxExecutable {
+    fn command(&self) -> Command {
+        Command::new(format!("/proc/self/fd/{}", self.executable.as_raw_fd()))
+    }
+
+    fn revalidate(&self) -> Result<(), LaunchError> {
+        let target = self.invocation.canonicalize().map_err(|error| {
+            LaunchError::InvalidSandbox(format!(
+                "canonicalize bubblewrap sandbox {}: {error}",
+                self.invocation.display()
+            ))
+        })?;
+        if target != self.target {
+            return Err(LaunchError::InvalidSandbox(format!(
+                "bubblewrap sandbox target changed: {}",
+                self.invocation.display()
+            )));
+        }
+        let path_executable = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&target)
+            .map_err(|error| {
+                LaunchError::InvalidSandbox(format!(
+                    "open bubblewrap sandbox {}: {error}",
+                    target.display()
+                ))
+            })?;
+        let metadata = path_executable.metadata().map_err(|error| {
+            LaunchError::InvalidSandbox(format!(
+                "inspect bubblewrap sandbox {}: {error}",
+                target.display()
+            ))
+        })?;
+        if !metadata.is_file()
+            || metadata.permissions().mode() & 0o111 == 0
+            || metadata.len() == 0
+            || metadata.len() > MAX_EXECUTABLE_BYTES
+            || metadata.dev() != self.target_device
+            || metadata.ino() != self.target_inode
+            || metadata.uid() != 0
+            || metadata.permissions().mode() & 0o022 != 0
+        {
+            return Err(LaunchError::InvalidSandbox(format!(
+                "bubblewrap sandbox identity, ownership, or permissions changed: {}",
+                target.display()
+            )));
+        }
+        let mut executable = self.executable.try_clone().map_err(|error| {
+            LaunchError::InvalidSandbox(format!(
+                "duplicate bubblewrap sandbox descriptor {}: {error}",
+                target.display()
+            ))
+        })?;
+        let held_metadata = executable.metadata().map_err(|error| {
+            LaunchError::InvalidSandbox(format!(
+                "inspect held bubblewrap sandbox {}: {error}",
+                target.display()
+            ))
+        })?;
+        if held_metadata.dev() != self.target_device || held_metadata.ino() != self.target_inode {
+            return Err(LaunchError::InvalidSandbox(format!(
+                "held bubblewrap sandbox identity changed: {}",
+                target.display()
+            )));
+        }
+        let target_sha256 = file_sha256_from(&mut executable).map_err(|error| {
+            LaunchError::InvalidSandbox(format!(
+                "hash bubblewrap sandbox {}: {error}",
+                target.display()
+            ))
+        })?;
+        if target_sha256 != self.target_sha256 {
+            return Err(LaunchError::InvalidSandbox(format!(
+                "bubblewrap sandbox content changed: {}",
+                target.display()
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn validate_sandbox_executable() -> Result<ValidatedSandboxExecutable, LaunchError> {
+    let invocation = PathBuf::from(SANDBOX_EXECUTABLE);
+    let target = validate_absolute_executable(invocation.as_os_str(), "bubblewrap sandbox")
+        .map_err(LaunchError::InvalidSandbox)?;
+    let mut executable = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&target)
+        .map_err(|error| {
+            LaunchError::InvalidSandbox(format!(
+                "open bubblewrap sandbox {}: {error}",
+                target.display()
+            ))
+        })?;
+    let metadata = executable.metadata().map_err(|error| {
+        LaunchError::InvalidSandbox(format!(
+            "inspect bubblewrap sandbox {}: {error}",
+            target.display()
+        ))
+    })?;
+    if metadata.uid() != 0 || metadata.permissions().mode() & 0o022 != 0 {
+        return Err(LaunchError::InvalidSandbox(format!(
+            "bubblewrap sandbox must be root-owned and not group/other writable: {}",
+            target.display()
+        )));
+    }
+    if metadata.len() == 0 || metadata.len() > MAX_EXECUTABLE_BYTES {
+        return Err(LaunchError::InvalidSandbox(format!(
+            "bubblewrap sandbox exceeds executable size limit: {}",
+            target.display()
+        )));
+    }
+    let target_device = metadata.dev();
+    let target_inode = metadata.ino();
+    let target_sha256 = file_sha256_from(&mut executable).map_err(|error| {
+        LaunchError::InvalidSandbox(format!(
+            "hash bubblewrap sandbox {}: {error}",
+            SANDBOX_EXECUTABLE
+        ))
+    })?;
+    let validated = ValidatedSandboxExecutable {
+        invocation,
+        target,
+        target_device,
+        target_inode,
+        target_sha256,
+        executable,
+    };
+    validated.revalidate()?;
+    Ok(validated)
 }
 
 impl ValidatedPythonInterpreter {
     fn invocation(&self) -> &Path {
         &self.invocation
+    }
+
+    fn sealed_fd(&self) -> libc::c_int {
+        self.sealed_image.as_raw_fd()
+    }
+
+    fn direct_command(&self) -> Command {
+        let fd = self.sealed_fd();
+        let mut command = Command::new(format!("/proc/self/fd/{fd}"));
+        command.arg0(&self.invocation);
+        inherit_fd_across_exec(&mut command, fd);
+        command
     }
 
     fn revalidate(&self) -> Result<(), LaunchError> {
@@ -1572,6 +1755,8 @@ impl ValidatedPythonInterpreter {
         })?;
         if !metadata.is_file()
             || metadata.permissions().mode() & 0o111 == 0
+            || metadata.len() == 0
+            || metadata.len() > MAX_EXECUTABLE_BYTES
             || metadata.dev() != self.target_device
             || metadata.ino() != self.target_inode
         {
@@ -1592,8 +1777,81 @@ impl ValidatedPythonInterpreter {
                 target.display()
             )));
         }
+        let mut sealed_image = self.sealed_image.try_clone().map_err(|error| {
+            LaunchError::InvalidPythonInterpreter(format!(
+                "duplicate sealed Python image descriptor: {error}"
+            ))
+        })?;
+        let sealed_sha256 = file_sha256_from(&mut sealed_image).map_err(|error| {
+            LaunchError::InvalidPythonInterpreter(format!("hash sealed Python image: {error}"))
+        })?;
+        if sealed_sha256 != self.target_sha256 {
+            return Err(LaunchError::InvalidPythonInterpreter(
+                "sealed Python image content changed".to_owned(),
+            ));
+        }
         Ok(())
     }
+}
+
+fn inherit_fd_across_exec(command: &mut Command, fd: libc::c_int) {
+    // SAFETY: fcntl is async-signal-safe. Closure changes only inherited
+    // descriptor flags after fork and before exec.
+    unsafe {
+        command.pre_exec(move || {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+fn sealed_executable_snapshot(
+    source: &mut fs::File,
+    label: &'static str,
+) -> Result<fs::File, io::Error> {
+    let source_bytes = source.metadata()?.len();
+    if source_bytes == 0 || source_bytes > MAX_EXECUTABLE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{label} exceeds executable size limit"),
+        ));
+    }
+    let name = CString::new(format!("lamquant-{label}"))
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid memfd label"))?;
+    let fd =
+        unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut snapshot = unsafe { fs::File::from_raw_fd(fd) };
+    source.seek(SeekFrom::Start(0))?;
+    let copied = io::copy(
+        &mut source.take(MAX_EXECUTABLE_BYTES.saturating_add(1)),
+        &mut snapshot,
+    )?;
+    if copied != source_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{label} changed size while being sealed"),
+        ));
+    }
+    source.seek(SeekFrom::Start(0))?;
+    snapshot.flush()?;
+    if unsafe { libc::fchmod(fd, 0o500) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let seals = libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+    if unsafe { libc::fcntl(fd, libc::F_ADD_SEALS, seals) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    snapshot.seek(SeekFrom::Start(0))?;
+    Ok(snapshot)
 }
 
 fn validate_python_interpreter(python: &OsStr) -> Result<ValidatedPythonInterpreter, LaunchError> {
@@ -1637,6 +1895,12 @@ fn validate_python_interpreter(python: &OsStr) -> Result<ValidatedPythonInterpre
             canonical.display()
         )));
     }
+    if metadata.len() == 0 || metadata.len() > MAX_EXECUTABLE_BYTES {
+        return Err(LaunchError::InvalidPythonInterpreter(format!(
+            "Python interpreter exceeds executable size limit: {}",
+            canonical.display()
+        )));
+    }
     let target_device = metadata.dev();
     let target_inode = metadata.ino();
     let target_sha256 = file_sha256_from(&mut executable).map_err(|error| {
@@ -1645,10 +1909,25 @@ fn validate_python_interpreter(python: &OsStr) -> Result<ValidatedPythonInterpre
             canonical.display()
         ))
     })?;
-    // Execute through the operator-supplied path: CPython uses that invocation
-    // path to discover pyvenv.cfg and the venv's site-packages. The handshake
-    // separately proves which canonical executable target actually ran.
-    let mut command = Command::new(requested);
+    let sealed_image =
+        sealed_executable_snapshot(&mut executable, "legacy-python").map_err(|error| {
+            LaunchError::InvalidPythonInterpreter(format!(
+                "seal Python interpreter {}: {error}",
+                canonical.display()
+            ))
+        })?;
+    let validated = ValidatedPythonInterpreter {
+        invocation: requested.to_owned(),
+        target: canonical.clone(),
+        target_device,
+        target_inode,
+        target_sha256,
+        sealed_image,
+    };
+    validated.revalidate()?;
+    // Execute immutable bytes while preserving the operator-supplied argv[0],
+    // which CPython uses to discover pyvenv.cfg and venv site-packages.
+    let mut command = validated.direct_command();
     command
         .env_clear()
         .args(["-I", "-B", "-c", PYTHON_HANDSHAKE])
@@ -1698,13 +1977,6 @@ fn validate_python_interpreter(python: &OsStr) -> Result<ValidatedPythonInterpre
             "Python 3.10 or newer required, got {major}.{minor}"
         )));
     }
-    let validated = ValidatedPythonInterpreter {
-        invocation: requested.to_owned(),
-        target: canonical,
-        target_device,
-        target_inode,
-        target_sha256,
-    };
     validated.revalidate()?;
     Ok(validated)
 }
@@ -2654,6 +2926,7 @@ fn file_sha256(path: &Path) -> Result<String, io::Error> {
 }
 
 fn file_sha256_from(input: &mut fs::File) -> Result<String, io::Error> {
+    input.seek(SeekFrom::Start(0))?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
@@ -2663,6 +2936,7 @@ fn file_sha256_from(input: &mut fs::File) -> Result<String, io::Error> {
         }
         hasher.update(&buffer[..count]);
     }
+    input.seek(SeekFrom::Start(0))?;
     Ok(hex_digest(hasher.finalize()))
 }
 
@@ -2678,12 +2952,14 @@ fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
 
 fn dependency_preflight(
     workspace: &FrozenWorkspace,
+    sandbox: &ValidatedSandboxExecutable,
     python: &ValidatedPythonInterpreter,
     environment: &[LegacyEnvironment],
     modules: Vec<&str>,
 ) -> Result<Vec<u8>, LaunchError> {
+    sandbox.revalidate()?;
     python.revalidate()?;
-    let mut command = isolated_python_command(workspace, python.invocation(), environment);
+    let mut command = isolated_python_command(workspace, sandbox, python, environment);
     command
         .args(["-I", "-B", "-c", DEPENDENCY_PREFLIGHT])
         .arg(workspace.root().join("source/python"))
@@ -2717,11 +2993,12 @@ fn dependency_preflight(
 fn preflight_dependency_environment(
     workspace: &FrozenWorkspace,
     verified: &VerifiedCheckout,
+    sandbox: &ValidatedSandboxExecutable,
     python: &ValidatedPythonInterpreter,
     environment: &[LegacyEnvironment],
     modules: Vec<&str>,
 ) -> Result<(), LaunchError> {
-    let report = dependency_preflight(workspace, python, environment, modules)?;
+    let report = dependency_preflight(workspace, sandbox, python, environment, modules)?;
     workspace
         .revalidate(verified)
         .map_err(map_workspace_error)?;
@@ -2992,10 +3269,13 @@ fn write_nonblocking(
 
 fn isolated_python_command(
     workspace: &FrozenWorkspace,
-    python: &Path,
+    sandbox: &ValidatedSandboxExecutable,
+    python: &ValidatedPythonInterpreter,
     environment: &[LegacyEnvironment],
 ) -> Command {
-    let mut command = Command::new(SANDBOX_EXECUTABLE);
+    let mut command = sandbox.command();
+    let python_fd = python.sealed_fd();
+    inherit_fd_across_exec(&mut command, python_fd);
     command
         .env_clear()
         .args(["--ro-bind", "/", "/"])
@@ -3006,6 +3286,10 @@ fn isolated_python_command(
         .args(["--proc", "/proc"])
         .args(["--tmpfs", "/tmp"])
         .args(["--tmpfs", "/dev/shm"])
+        .args(["--perms", "0500"])
+        .arg("--ro-bind-data")
+        .arg(python_fd.to_string())
+        .arg(PINNED_PYTHON_EXECUTABLE)
         .arg("--bind")
         .arg(workspace.root())
         .arg(workspace.root())
@@ -3025,8 +3309,10 @@ fn isolated_python_command(
         .args(["--unshare-pid", "--die-with-parent"])
         .arg("--chdir")
         .arg(workspace.execution_root())
+        .arg("--argv0")
+        .arg(python.invocation())
         .arg("--")
-        .arg(python)
+        .arg(PINNED_PYTHON_EXECUTABLE)
         .env("HOME", workspace.root().join("home"))
         .env("LAMQUANT_LEGACY_MODE", "lma-direct-training")
         .env(
@@ -3054,11 +3340,12 @@ fn isolated_python_command(
 
 fn python_command(
     workspace: &FrozenWorkspace,
-    python: &Path,
+    sandbox: &ValidatedSandboxExecutable,
+    python: &ValidatedPythonInterpreter,
     environment: &[LegacyEnvironment],
     args: &[OsString],
 ) -> Command {
-    let mut command = isolated_python_command(workspace, python, environment);
+    let mut command = isolated_python_command(workspace, sandbox, python, environment);
     command
         .args(["-I", "-B", "-c", ISOLATED_RUNNER])
         .arg(workspace.root().join("source/python"))
@@ -3116,6 +3403,19 @@ mod tests {
 
     fn absolute_git() -> PathBuf {
         executable_on_path("git")
+    }
+
+    fn lma_direct_args(extra: &[&str]) -> Vec<OsString> {
+        [
+            "--lma-root",
+            "/archive/lma",
+            "--split-manifest",
+            "/archive/split.json",
+        ]
+        .into_iter()
+        .chain(extra.iter().copied())
+        .map(OsString::from)
+        .collect()
     }
 
     fn git(root: &Path, args: &[&str]) -> String {
@@ -3217,9 +3517,43 @@ mod tests {
         let workspace_parent = tempfile::tempdir().expect("workspace parent");
         let workspace = workspace_parent.path().join("legacy-workspace");
         assert!(matches!(
-            launch_verified_at(&verified, &revision, absolute_git(), &workspace, &[], &[],),
+            launch_verified_at(
+                &verified,
+                &revision,
+                absolute_git(),
+                &workspace,
+                &[],
+                &lma_direct_args(&[]),
+            ),
             Err(LaunchError::InvalidPythonInterpreter(_))
         ));
+    }
+
+    #[test]
+    fn invalid_arguments_fail_before_git_execution() {
+        let parent = tempfile::tempdir().expect("fail-fast fixture");
+        let marker = parent.path().join("git-ran");
+        let git = parent.path().join("git");
+        fs::write(
+            &git,
+            format!("#!/bin/sh\n: > '{}'\nexit 99\n", marker.display()),
+        )
+        .expect("write fake Git");
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o700))
+            .expect("make fake Git executable");
+        let error = launch(
+            &git,
+            parent.path().join("missing-checkout"),
+            LegacyTrainer::TrainJoint,
+            absolute_python(),
+            parent.path().join("workspace"),
+            &[],
+            &[OsString::from("--training-snapshot")],
+        )
+        .expect_err("forbidden argument must fail before Git");
+
+        assert!(matches!(error, LaunchError::InvalidArguments(_)));
+        assert!(!marker.exists(), "invalid local arguments executed Git");
     }
 
     #[test]
@@ -3429,13 +3763,6 @@ mod tests {
                 vec![workspace.join("run/python/ai_models/oracle")],
             ),
             (
-                LegacyTrainer::TrainTeacher,
-                vec![
-                    workspace.join("run"),
-                    workspace.join("run/python/lamquant/oracle"),
-                ],
-            ),
-            (
                 LegacyTrainer::TrainVocosDecoder,
                 vec![workspace.join("run/python/ai_models/decoder")],
             ),
@@ -3625,8 +3952,14 @@ mod tests {
         for abbreviated in ["--log", "--lr-s", "--target-s", "--dac-i"] {
             assert!(matches!(
                 validate_legacy_arguments(
-                    LegacyTrainer::TrainTeacher,
-                    &[OsString::from(abbreviated)]
+                    LegacyTrainer::TrainJoint,
+                    &[
+                        OsString::from(abbreviated),
+                        OsString::from("--lma-root"),
+                        OsString::from("/archive/lma"),
+                        OsString::from("--split-manifest"),
+                        OsString::from("/archive/split.json"),
+                    ]
                 ),
                 Err(LaunchError::InvalidArguments(_))
             ));
@@ -3643,6 +3976,43 @@ mod tests {
     }
 
     #[test]
+    fn every_allowlisted_trainer_requires_exact_lma_direct_inputs() {
+        for trainer in LegacyTrainer::ALL {
+            validate_legacy_arguments(trainer, &lma_direct_args(&[]))
+                .unwrap_or_else(|error| panic!("{trainer} rejected exact LMA inputs: {error}"));
+            for args in [
+                vec![
+                    OsString::from("--split-manifest"),
+                    OsString::from("/archive/split.json"),
+                ],
+                vec![OsString::from("--lma-root"), OsString::from("/archive/lma")],
+                vec![
+                    OsString::from("--lma-root="),
+                    OsString::from("--split-manifest"),
+                    OsString::from("/archive/split.json"),
+                ],
+                vec![
+                    OsString::from("--lma-root"),
+                    OsString::from("/archive/lma"),
+                    OsString::from("--split-manifest"),
+                ],
+            ] {
+                assert!(
+                    matches!(
+                        validate_legacy_arguments(trainer, &args),
+                        Err(LaunchError::InvalidArguments(_))
+                    ),
+                    "{trainer} accepted incomplete LMA-direct inputs: {args:?}"
+                );
+            }
+        }
+        assert!(
+            LegacyTrainer::from_str("train_teacher").is_err(),
+            "NPZ/memmap-only train_teacher must remain outside rollback allowlist"
+        );
+    }
+
+    #[test]
     fn frozen_exact_options_win_over_protected_prefixes() {
         for trainer in [
             LegacyTrainer::PretrainMae,
@@ -3652,10 +4022,10 @@ mod tests {
             LegacyTrainer::TrainL3Teacher,
             LegacyTrainer::TrainVocosDecoder,
         ] {
-            validate_legacy_arguments(trainer, &[OsString::from("--lr")])
+            validate_legacy_arguments(trainer, &lma_direct_args(&["--lr"]))
                 .unwrap_or_else(|error| panic!("{trainer} rejected exact --lr: {error}"));
         }
-        validate_legacy_arguments(LegacyTrainer::TrainJoint, &[OsString::from("--resume")])
+        validate_legacy_arguments(LegacyTrainer::TrainJoint, &lma_direct_args(&["--resume"]))
             .expect("train_joint exact --resume must not resolve to --resume-dir");
         assert!(matches!(
             validate_legacy_arguments(LegacyTrainer::TrainJoint, &[OsString::from("--res")]),
@@ -3725,7 +4095,7 @@ mod tests {
             absolute_python(),
             &workspace,
             &[],
-            &[],
+            &lma_direct_args(&[]),
         )
         .expect("launch source-sandbox fixture");
 
@@ -3763,7 +4133,7 @@ mod tests {
             absolute_python(),
             &workspace,
             &[],
-            &[],
+            &lma_direct_args(&[]),
         )
         .expect("launch detached-child fixture");
 
@@ -3805,7 +4175,10 @@ mod tests {
             PENDING_TERMINATION_SIGNAL.store(libc::SIGTERM, Ordering::Release);
         });
 
-        let status = supervised_status(python_command(&workspace, &absolute_python(), &[], &[]))
+        let sandbox = validate_sandbox_executable().expect("validate sandbox");
+        let python = validate_python_interpreter(absolute_python().as_os_str())
+            .expect("validate Python interpreter");
+        let status = supervised_status(python_command(&workspace, &sandbox, &python, &[], &[]))
             .expect("signal-supervised trainer");
         sender.join().expect("signal sender");
 
@@ -3923,6 +4296,94 @@ mod tests {
     }
 
     #[test]
+    fn oversized_sparse_python_fails_before_copy_or_handshake() {
+        let parent = tempfile::tempdir().expect("interpreter parent");
+        let executable = parent.path().join("python");
+        let file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&executable)
+            .expect("create sparse Python");
+        file.set_len(MAX_EXECUTABLE_BYTES + 1)
+            .expect("size sparse Python");
+        drop(file);
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
+            .expect("make sparse Python executable");
+
+        assert!(matches!(
+            validate_python_interpreter(executable.as_os_str()),
+            Err(LaunchError::InvalidPythonInterpreter(_))
+        ));
+    }
+
+    #[test]
+    fn sandbox_in_place_mutation_fails_revalidation() {
+        let parent = tempfile::tempdir().expect("sandbox parent");
+        let executable = parent.path().join("bwrap");
+        fs::copy(SANDBOX_EXECUTABLE, &executable).expect("copy sandbox executable");
+        let target = executable
+            .canonicalize()
+            .expect("canonical sandbox executable");
+        let mut input = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&target)
+            .expect("open copied sandbox");
+        let metadata = input.metadata().expect("sandbox metadata");
+        let validated = ValidatedSandboxExecutable {
+            invocation: executable.clone(),
+            target,
+            target_device: metadata.dev(),
+            target_inode: metadata.ino(),
+            target_sha256: file_sha256_from(&mut input).expect("hash copied sandbox"),
+            executable: input,
+        };
+        let mut replacement = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&executable)
+            .expect("open sandbox for in-place replacement");
+        replacement
+            .write_all(b"#!/bin/sh\nexit 0\n")
+            .expect("replace sandbox bytes in place");
+        replacement.sync_all().expect("sync sandbox replacement");
+        assert_eq!(
+            executable.metadata().expect("replacement metadata").ino(),
+            validated.target_inode,
+            "test must preserve validated sandbox inode"
+        );
+
+        assert!(matches!(
+            validated.revalidate(),
+            Err(LaunchError::InvalidSandbox(_))
+        ));
+    }
+
+    #[test]
+    fn sealed_python_image_survives_post_validation_path_mutation() {
+        let parent = tempfile::tempdir().expect("interpreter parent");
+        let executable = parent.path().join("python");
+        fs::copy(absolute_python(), &executable).expect("copy Python interpreter");
+        let validated =
+            validate_python_interpreter(executable.as_os_str()).expect("validate copied Python");
+        let mut replacement = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&executable)
+            .expect("open Python for post-validation replacement");
+        replacement
+            .write_all(b"#!/bin/sh\nexit 99\n")
+            .expect("replace original Python path");
+        replacement.sync_all().expect("sync Python replacement");
+
+        let mut command = validated.direct_command();
+        command.args(["-I", "-B", "-c", "print('PINNED_PYTHON_PASS')"]);
+        let output = command.output().expect("execute sealed Python image");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"PINNED_PYTHON_PASS\n");
+    }
+
+    #[test]
     fn real_venv_interpreter_keeps_venv_site_packages_during_launch() {
         let venv_parent = tempfile::Builder::new()
             .prefix(".lamquant-venv-test-")
@@ -3971,8 +4432,15 @@ mod tests {
         let workspace_parent = tempfile::tempdir().expect("workspace parent");
         let workspace = workspace_parent.path().join("legacy-workspace");
 
-        let status = launch_verified_at(&verified, &revision, &venv_python, &workspace, &[], &[])
-            .expect("launch with real venv interpreter");
+        let status = launch_verified_at(
+            &verified,
+            &revision,
+            &venv_python,
+            &workspace,
+            &[],
+            &lma_direct_args(&[]),
+        )
+        .expect("launch with real venv interpreter");
 
         assert!(status.success(), "venv-backed trainer exited {status}");
         assert_eq!(
@@ -3987,7 +4455,7 @@ mod tests {
         let ready = parent.join(format!("{name}.ready"));
         fs::write(
             &executable,
-            "#!/bin/sh\n: > \"$0.ready\"\nexec /bin/sleep 60\n",
+            format!("#!/bin/sh\n: > '{}'\nexec /bin/sleep 60\n", ready.display()),
         )
         .expect("write blocking handshake executable");
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
@@ -4059,17 +4527,28 @@ mod tests {
         .expect("write blocking preflight Python");
         fs::set_permissions(&python, fs::Permissions::from_mode(0o700))
             .expect("make blocking preflight Python executable");
-        let target_sha256 = file_sha256(&python).expect("hash fake Python");
+        let target = python.canonicalize().expect("canonical fake Python");
+        let mut input = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&target)
+            .expect("open fake Python");
+        let metadata = input.metadata().expect("fake Python metadata");
+        let target_sha256 = file_sha256_from(&mut input).expect("hash fake Python");
+        let sealed_image =
+            sealed_executable_snapshot(&mut input, "preflight-signal").expect("seal fake Python");
         let python = ValidatedPythonInterpreter {
-            target: python.canonicalize().expect("canonical fake Python"),
-            target_device: python.metadata().expect("fake Python metadata").dev(),
-            target_inode: python.metadata().expect("fake Python metadata").ino(),
+            target,
+            target_device: metadata.dev(),
+            target_inode: metadata.ino(),
             target_sha256,
             invocation: python,
+            sealed_image,
         };
+        let sandbox = validate_sandbox_executable().expect("validate sandbox");
         let sender = signal_when_ready(workspace_path.join("artifacts/dependency-signal.ready"));
 
-        let error = dependency_preflight(&workspace, &python, &[], Vec::new())
+        let error = dependency_preflight(&workspace, &sandbox, &python, &[], Vec::new())
             .expect_err("signal must interrupt dependency preflight");
         sender.join().expect("signal sender");
 
@@ -4098,9 +4577,17 @@ mod tests {
             .expect("create preflight-symlink workspace");
         let python =
             validate_python_interpreter(absolute_python().as_os_str()).expect("validate Python");
+        let sandbox = validate_sandbox_executable().expect("validate sandbox");
 
         assert!(matches!(
-            preflight_dependency_environment(&workspace, &verified, &python, &[], Vec::new()),
+            preflight_dependency_environment(
+                &workspace,
+                &verified,
+                &sandbox,
+                &python,
+                &[],
+                Vec::new()
+            ),
             Err(LaunchError::Workspace(_))
         ));
         assert!(
@@ -4225,7 +4712,10 @@ mod tests {
         let workspace_path = workspace_parent.path().join("legacy-workspace");
         let workspace = FrozenWorkspace::open_or_create(&verified, &workspace_path)
             .expect("frozen fixture workspace");
-        let command = python_command(&workspace, &absolute_python(), &[], &[]);
+        let sandbox = validate_sandbox_executable().expect("validate sandbox");
+        let python = validate_python_interpreter(absolute_python().as_os_str())
+            .expect("validate Python interpreter");
+        let command = python_command(&workspace, &sandbox, &python, &[], &[]);
         assert!(command
             .get_envs()
             .all(|(name, _)| name != OsStr::new("BLUT_AI_MODELS")));
@@ -4304,7 +4794,14 @@ mod tests {
         let workspace = workspace_parent.path().join("legacy-workspace");
 
         assert!(matches!(
-            launch_verified_at(&verified, &revision, absolute_git(), workspace, &[], &[],),
+            launch_verified_at(
+                &verified,
+                &revision,
+                absolute_git(),
+                workspace,
+                &[],
+                &lma_direct_args(&[]),
+            ),
             Err(LaunchError::InvalidPythonInterpreter(_))
         ));
     }
