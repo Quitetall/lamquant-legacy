@@ -5,6 +5,7 @@ members = [
     "crates/lamquant-legacy-adapter",
     "crates/lamquant-legacy-ir",
     "crates/lamquant-lml-legacy",
+    "crates/lamquant-op-event-legacy",
     "crates/lamquant-stage-pass-legacy",
     "crates/lamquant-runtime-legacy",
 ]
@@ -15,6 +16,7 @@ default-members = [
     "crates/lamquant-legacy-adapter",
     "crates/lamquant-legacy-ir",
     "crates/lamquant-lml-legacy",
+    "crates/lamquant-op-event-legacy",
     "crates/lamquant-stage-pass-legacy",
     "crates/lamquant-runtime-legacy",
 ]

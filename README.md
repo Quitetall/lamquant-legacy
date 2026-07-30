@@ -37,6 +37,22 @@ Current LamQuant execution uses capability-driven ABIR Nodes, compiled plans,
 implementation-bound kernels, and transactional receipts. Compatibility tools
 may run the retired runtime in isolation; mainline code must not depend on it.
 
+## Retired operation-event protocol
+
+`lamquant-op-event-legacy` preserves the final `OpEvent` enum, process runner,
+bounded channel sink, SSH transport, launcher registry, JSON Schema, fixture,
+Python emitter, and TypeScript binding. Rust sources come from LamQuant revision
+`4ea94a8499f3493127d38d9ba9380ac54b578d2d`; codec artifacts come from
+LamQuant Lossless revision `9c923f743def0eebef6394486d2c436ae240f2b3`;
+the TypeScript binding comes from LamQuant Vision revision
+`d3dd2d00369e31387b297c29eee6d6261c517b87`.
+
+Current front ends consume projections bound to compiled graph, plan,
+invocation, kernel, and implementation identities. Only the supervising
+`PlanExecutor` creates terminal receipt/failure projections. Migration tools may
+use the retired event protocol in isolation; production code must not depend on
+it.
+
 The adapter provides bounded inspection and exact, non-destructive forensic
 conversion for every retired profile. BCS1, LML1, and LQTP1 additionally
 support a bounded `import-semantic` process operation. That operation decodes
