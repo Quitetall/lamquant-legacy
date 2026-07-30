@@ -137,6 +137,19 @@ This launcher is process-isolated rollback tooling and emits no promotable
 checkpoint attestation. `--help` prints launcher syntax; `--list-trainers`
 prints the closed seven-entry allowlist.
 
+## Retired Python codec
+
+`retired/python-codec-v7.7.0/` preserves the exact 65-file, 20,101-line
+`lamquant_codec` source snapshot from LamQuant Lossless revision
+`f9b915466e67a87ad8d290a9793d349df250c9fb`. It is audit and rollback evidence,
+not a publishable Python distribution or ambient import fallback. Current
+LamQuant code uses the canonical `lamquant-core` PyO3 codec, neural-owned model
+front-end, and training-owned dataset adapters.
+
+`python3 tools/verify_retired_python_codec.py` checks the local hash manifest.
+Supplying `--source-repo` additionally proves every preserved byte against the
+originating Git revision.
+
 ## Retired operation-event protocol
 
 `lamquant-op-event-legacy` preserves the final `OpEvent` enum, process runner,
