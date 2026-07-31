@@ -229,6 +229,42 @@ pub struct Capability {
     pub forensic_import: bool,
     pub semantic_import: bool,
     pub reverse_export: bool,
+    /// The exact strings a caller may put in the request's `operation` field.
+    ///
+    /// The booleans above name capabilities in Rust's casing; these name them
+    /// as the wire spells them, because `ProcessRequest` is
+    /// `rename_all = "kebab-case"`. Without this a manifest can advertise a
+    /// capability under a name no caller could ever send.
+    ///
+    /// Derived from the booleans in `capability_operations`, never written by
+    /// hand, so the two spellings cannot disagree.
+    pub operations: Vec<String>,
+}
+
+/// Wire operation names implied by a capability's flags.
+///
+/// Kept next to `Capability` so a new flag and its wire name land together;
+/// the pairing is the thing that rots if they are edited in separate places.
+fn capability_operations(
+    inspect: bool,
+    forensic_import: bool,
+    semantic_import: bool,
+    reverse_export: bool,
+) -> Vec<String> {
+    let mut operations = Vec::new();
+    if inspect {
+        operations.push("inspect".to_owned());
+    }
+    if forensic_import {
+        operations.push("convert-forensic".to_owned());
+    }
+    if semantic_import {
+        operations.push("import-semantic".to_owned());
+    }
+    if reverse_export {
+        operations.push("export-semantic".to_owned());
+    }
+    operations
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -411,12 +447,24 @@ pub fn capability_manifest() -> CapabilityManifest {
         process_protocol: "abir.adapter-process/v1".to_owned(),
         capabilities: formats
             .into_iter()
-            .map(|format| Capability {
-                profile: format.profile().to_owned(),
-                inspect: true,
-                forensic_import: true,
-                semantic_import: format.supports_semantic_import(),
-                reverse_export: format.supports_reverse_export(),
+            .map(|format| {
+                let inspect = true;
+                let forensic_import = true;
+                let semantic_import = format.supports_semantic_import();
+                let reverse_export = format.supports_reverse_export();
+                Capability {
+                    profile: format.profile().to_owned(),
+                    inspect,
+                    forensic_import,
+                    semantic_import,
+                    reverse_export,
+                    operations: capability_operations(
+                        inspect,
+                        forensic_import,
+                        semantic_import,
+                        reverse_export,
+                    ),
+                }
             })
             .collect(),
     }
