@@ -275,6 +275,16 @@ pub enum LegacyError {
     DecodedTooLarge,
     PayloadIdentityMismatch,
     MalformedContainer(String),
+    /// Payload CRC-32 disagreed with the stored checksum: the bytes changed.
+    ///
+    /// Split out of `MalformedContainer` because a corrupted payload and a
+    /// short read are different findings for a caller -- one says the archive
+    /// was altered, the other that it is incomplete -- and the conformance
+    /// suite distinguishes them (`CrcMismatch` vs `Truncated`). Collapsed into
+    /// one code they were only separable by parsing the message text.
+    CrcMismatch(String),
+    /// The container ended before the declared payload did: an incomplete file.
+    Truncated(String),
     SemanticValidation(String),
     UnsafeSource,
     DestinationConflict,
@@ -294,6 +304,8 @@ impl LegacyError {
             Self::DecodedTooLarge => "decoded-output-too-large",
             Self::PayloadIdentityMismatch => "payload-identity-mismatch",
             Self::MalformedContainer(_) => "malformed-container",
+            Self::CrcMismatch(_) => "crc-mismatch",
+            Self::Truncated(_) => "truncated",
             Self::SemanticValidation(_) => "semantic-validation",
             Self::UnsafeSource => "unsafe-source",
             Self::DestinationConflict => "destination-conflict",
@@ -327,6 +339,8 @@ impl fmt::Display for LegacyError {
                 formatter.write_str("payload bytes do not match their ABIR ContentId")
             }
             Self::MalformedContainer(message) => write!(formatter, "malformed container: {message}"),
+            Self::CrcMismatch(message) => write!(formatter, "payload CRC mismatch: {message}"),
+            Self::Truncated(message) => write!(formatter, "truncated container: {message}"),
             Self::SemanticValidation(message) => {
                 write!(formatter, "semantic ABIR validation failed: {message}")
             }
@@ -1393,7 +1407,7 @@ fn build_artifacts(
             let facts = inspect_container(source, format, max_decoded_bytes)?;
             let decoded = decode_source(source, format)?;
             let signal = lamquant_lml_legacy::container::read_bytes(&decoded)
-                .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?
+                .map_err(classify_container_error)?
                 .0;
             verify_decoded_shape(&signal, &facts)?;
             build_semantic_artifacts(anchor, &facts, signal, max_decoded_bytes)
@@ -3255,6 +3269,27 @@ fn verify_existing(
 
 fn io_error(error: std::io::Error) -> LegacyError {
     LegacyError::Io(error.to_string())
+}
+
+/// Preserve the decoder's own distinction between a corrupted payload and an
+/// incomplete one.
+///
+/// `LmlError` already separates `CrcMismatch` from `Truncated`; flattening
+/// both into `MalformedContainer` threw that away at the process boundary and
+/// left callers parsing message text to recover it. Matched on the variant,
+/// never on the rendered string, so rewording a message cannot silently
+/// reclassify an error.
+///
+/// Everything else stays `MalformedContainer`: this widens the taxonomy
+/// exactly where the decoder has something more specific to say, rather than
+/// inventing codes for conditions it does not itself distinguish.
+fn classify_container_error(error: lamquant_lml_mcu::error::LmlError) -> LegacyError {
+    use lamquant_lml_mcu::error::LmlError;
+    match &error {
+        LmlError::CrcMismatch { .. } => LegacyError::CrcMismatch(error.to_string()),
+        LmlError::Truncated { .. } => LegacyError::Truncated(error.to_string()),
+        _ => LegacyError::MalformedContainer(error.to_string()),
+    }
 }
 
 #[cfg(unix)]
