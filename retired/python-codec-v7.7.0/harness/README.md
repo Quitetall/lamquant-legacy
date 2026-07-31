@@ -1,7 +1,20 @@
 # Retired Python codec — test and tool harness
 
-The suite that exercised the duplicate pure-Python codec, sequestered here by
-Gen 8 Package 32 alongside the `source/` tree it tested.
+What the main tree still held of the suite that exercised the duplicate
+pure-Python codec, after subtracting everything `support/` already preserved.
+
+**Read `support/` first.** Package 32 sequestered most of this suite there
+already. This directory holds only the 58 files that `support/` did NOT
+already have byte-identically:
+
+  * **43** were never sequestered at all.
+  * **15** existed in `support/` but had DIVERGED -- the main tree's copy had
+    moved on. Those are kept here under their original paths; `support/` keeps
+    the older copy. Neither is authoritative over the other, and a diff between
+    them is the honest record of what changed after the first sequester.
+
+The other 57 were byte-identical to their `support/` copies and are not
+duplicated here.
 
 **These were already dead when they moved.** Package 32 retired
 `lamquant_codec` from the main tree, and every file here imports it, so the
