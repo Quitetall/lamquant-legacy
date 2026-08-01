@@ -5,6 +5,15 @@ version = 3
 [[package]]
 name = "abir"
 version = "0.1.0"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=1891593753180ea20fe1879732be48f720700926#1891593753180ea20fe1879732be48f720700926"
+dependencies = [
+ "blake3",
+ "serde_json",
+]
+
+[[package]]
+name = "abir"
+version = "0.1.0"
 source = "git+https://github.com/Quitetall/ABIR.git?rev=92cae253f0a43b0c457cb1c0b773d77420f288a7#92cae253f0a43b0c457cb1c0b773d77420f288a7"
 dependencies = [
  "blake3",
@@ -14,9 +23,9 @@ dependencies = [
 [[package]]
 name = "abir-adapter"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=92cae253f0a43b0c457cb1c0b773d77420f288a7#92cae253f0a43b0c457cb1c0b773d77420f288a7"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=1891593753180ea20fe1879732be48f720700926#1891593753180ea20fe1879732be48f720700926"
 dependencies = [
- "abir",
+ "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=1891593753180ea20fe1879732be48f720700926)",
  "blake3",
  "serde",
  "serde_json",
@@ -27,7 +36,7 @@ name = "abir-bcs"
 version = "0.1.0"
 source = "git+https://github.com/Quitetall/ABIR.git?rev=92cae253f0a43b0c457cb1c0b773d77420f288a7#92cae253f0a43b0c457cb1c0b773d77420f288a7"
 dependencies = [
- "abir",
+ "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=92cae253f0a43b0c457cb1c0b773d77420f288a7)",
  "blake3",
  "chacha20poly1305",
  "minicbor",
@@ -41,7 +50,7 @@ name = "abir-training"
 version = "0.1.0"
 source = "git+https://github.com/Quitetall/ABIR.git?rev=92cae253f0a43b0c457cb1c0b773d77420f288a7#92cae253f0a43b0c457cb1c0b773d77420f288a7"
 dependencies = [
- "abir",
+ "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=92cae253f0a43b0c457cb1c0b773d77420f288a7)",
  "abir-bcs",
  "blake3",
  "serde",
@@ -975,7 +984,7 @@ dependencies = [
 name = "lamquant-abir-bridge"
 version = "0.1.0"
 dependencies = [
- "abir",
+ "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=1891593753180ea20fe1879732be48f720700926)",
  "blake3",
  "bytemuck",
  "lamquant-legacy-ir",
@@ -986,7 +995,7 @@ name = "lamquant-abir-codec"
 version = "0.1.0"
 source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=6a1ad2f8312ec2aa39129f6736229d4f3bf5314b#6a1ad2f8312ec2aa39129f6736229d4f3bf5314b"
 dependencies = [
- "abir",
+ "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=92cae253f0a43b0c457cb1c0b773d77420f288a7)",
  "abir-bcs",
  "blake3",
  "lamquant-abir-montage",
@@ -999,7 +1008,7 @@ name = "lamquant-abir-montage"
 version = "0.1.0"
 source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=6a1ad2f8312ec2aa39129f6736229d4f3bf5314b#6a1ad2f8312ec2aa39129f6736229d4f3bf5314b"
 dependencies = [
- "abir",
+ "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=92cae253f0a43b0c457cb1c0b773d77420f288a7)",
  "sha2",
 ]
 
@@ -1015,7 +1024,7 @@ dependencies = [
 name = "lamquant-legacy-adapter"
 version = "0.1.0"
 dependencies = [
- "abir",
+ "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=1891593753180ea20fe1879732be48f720700926)",
  "abir-adapter",
  "aes-gcm",
  "blake3",
@@ -1049,7 +1058,7 @@ name = "lamquant-lml"
 version = "0.9.3"
 source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=6a1ad2f8312ec2aa39129f6736229d4f3bf5314b#6a1ad2f8312ec2aa39129f6736229d4f3bf5314b"
 dependencies = [
- "abir",
+ "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=92cae253f0a43b0c457cb1c0b773d77420f288a7)",
  "abir-bcs",
  "abir-training",
  "base64",
