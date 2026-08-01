@@ -30,9 +30,9 @@ blake3 = { version = "=1.5.5", default-features = false }
 bytemuck = "=1.25.0"
 lamquant-legacy-ir = { path = "crates/lamquant-legacy-ir", version = "=0.1.1" }
 lamquant-lml-legacy = { path = "crates/lamquant-lml-legacy", version = "=0.1.1", default-features = false, features = ["legacy-decode", "legacy-encode", "legacy-tensor-pack"] }
-lamquant-lml-desktop = { git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "a12f1f1a307ef74395bb3a8e14afe3da80c8f15b", version = "=0.9.3", features = ["fast"] }
-lamquant-lml-mcu = { git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "a12f1f1a307ef74395bb3a8e14afe3da80c8f15b", version = "=0.9.3", default-features = false, features = ["std"] }
-lamquant-lml-archive = { package = "lamquant-lml", git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "a12f1f1a307ef74395bb3a8e14afe3da80c8f15b", version = "=0.9.3", default-features = false, features = ["std", "archive"] }
+lamquant-lml-desktop = { git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "34eed003a4ca251ae21653b021c9bd04f65aa233", version = "=0.9.3", features = ["fast"] }
+lamquant-lml-mcu = { git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "34eed003a4ca251ae21653b021c9bd04f65aa233", version = "=0.9.3", default-features = false, features = ["std"] }
+lamquant-lml-archive = { package = "lamquant-lml", git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "34eed003a4ca251ae21653b021c9bd04f65aa233", version = "=0.9.3", default-features = false, features = ["std", "archive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = { version = "0.10", default-features = false }
