@@ -11,7 +11,7 @@
 //! CPU-heavy) and streamed a window at a time.
 //!
 //! **Sample rate.** EDF/BDF self-report their rate (`EdfFile::sample_rate`); a
-//! `.lml` container does NOT carry the rate through `container::read_file` (the
+//! `.lml` container does NOT carry the rate through `container::read_from` (the
 //! header returned drops it), so the manifest declares an authoritative
 //! `sample_rate_hz` for `.lml` files — exactly as `watch_dir` takes `sample_rate`
 //! as a parameter. No magic constant.
@@ -156,8 +156,7 @@ fn decode_file(path: &Path, declared_rate: f64) -> Result<(Vec<Vec<i64>>, f64)> 
             Ok((edf.signal, edf.sample_rate))
         }
         _ => {
-            let (signal, _meta) =
-                lamquant_core::container::read_file(path).map_err(|e| err(e.to_string()))?;
+            let (signal, _meta) = crate::codec::read_lml_path(path)?;
             Ok((signal, declared_rate))
         }
     }

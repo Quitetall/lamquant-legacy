@@ -3,12 +3,19 @@
 //! Main LamQuant execution uses ABIR Nodes, kernels, compiled plans, and
 //! receipts. This crate preserves the final `Stage`/`Pass` API from the exact
 //! source revision named by [`SOURCE_REVISION`] for isolated compatibility
-//! tooling only.
+//! tooling only. Retired composition modules are owned here; current codec
+//! dependency supplies only shared container, error, LPC, IR, and source
+//! primitives needed by those frozen definitions.
 
 /// Immutable LamQuant Lossless revision that owns these retired definitions.
 pub const SOURCE_REVISION: &str = "db7ff36aff529886195e067ea9628d3e7a08cd84";
 
-pub use lamquant_lml_archive::{codec_stages, pass, pipeline, pipeline_dsl};
+pub use lamquant_lml_archive::{container, error, ir, lpc, source};
+
+pub mod codec_stages;
+pub mod pass;
+pub mod pipeline;
+pub mod pipeline_dsl;
 
 #[cfg(test)]
 mod tests {

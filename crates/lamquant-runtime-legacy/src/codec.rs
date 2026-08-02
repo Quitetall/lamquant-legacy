@@ -8,10 +8,11 @@
 //! - [`LmlFileSink`] accumulates windows and compresses them to a (rotating)
 //!   `.lml` container via the LML codec — the compress-to-disk output path.
 //!
-//! Both go through `lamquant_core::container::{read_file,write_file}` (the LML
+//! Both go through `lamquant_core::container::{read_from,write_file}` (the LML
 //! v1 container, byte-faithful lossless), so a window that enters `LmlFileSink`
 //! and is read back is sample-for-sample identical to the source.
 
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -20,6 +21,17 @@ use crate::error::{Result, RuntimeError};
 use crate::sink::{Sink, SinkInfo};
 use crate::source::{Source, SourceInfo};
 use crate::window::WindowBatch;
+
+pub(crate) fn read_lml_path(path: &Path) -> Result<(Vec<Vec<i64>>, String)> {
+    let source_error = |msg: String| RuntimeError::Source {
+        name: path.display().to_string(),
+        msg,
+    };
+    let file = std::fs::File::open(path).map_err(|error| source_error(error.to_string()))?;
+    let mut reader = BufReader::new(file);
+    lamquant_core::container::read_from(&mut reader)
+        .map_err(|error| source_error(error.to_string()))
+}
 
 /// Streams the windows of an already-encoded `.lml` file. Real biosignal data,
 /// no system library — proves the Source→Engine→Sink path end-to-end here.
@@ -36,11 +48,7 @@ impl LmlReplaySource {
     /// Decode `path` and prepare to stream it in `window`-sample chunks.
     pub fn open(path: impl AsRef<Path>, window: usize) -> Result<Self> {
         let path = path.as_ref();
-        let (signal, _meta) =
-            lamquant_core::container::read_file(path).map_err(|e| RuntimeError::Source {
-                name: path.display().to_string(),
-                msg: e.to_string(),
-            })?;
+        let (signal, _meta) = read_lml_path(path)?;
         // Sample rate is not carried on the plain read; the manifest declares the
         // window and the sink re-stamps rate. Default to the codec's canonical
         // 250 Hz for the replay's own descriptor.
