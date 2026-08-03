@@ -1,0 +1,8 @@
+{"type":"Started","ts_ms":1730000000000,"op_id":"encode","total":42}
+{"type":"Started","ts_ms":1730000000000,"op_id":"info"}
+{"type":"Progress","ts_ms":1730000001000,"current":5,"total":42,"message":"encoding file 5 of 42"}
+{"type":"FileDone","ts_ms":1730000002000,"path":"/data/sample.lml","success":true,"ms":120,"cr":2.74}
+{"type":"FileDone","ts_ms":1730000002000,"path":"/data/bad.lml","success":false,"ms":3}
+{"type":"Done","ts_ms":1730000003000,"message":"42 files OK in 9.4s"}
+{"type":"Error","ts_ms":1730000003500,"message":"out of disk space at /tmp"}
+{"type":"Log","ts_ms":1730000003700,"message":"[stderr] WARN: stale numba cache"}

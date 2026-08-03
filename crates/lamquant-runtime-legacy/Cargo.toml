@@ -1,0 +1,73 @@
+[package]
+name = "lamquant-runtime-legacy"
+version = "0.1.0"
+# The long-lived ingest→sink daemon library (ADR 0135). Orchestration glue over
+# the codec + LSL bridge; path-deps siblings + the codec submodule, so like the
+# `lamquant` umbrella it is not a crates.io artifact.
+publish = false
+edition = "2021"
+rust-version = "1.81"
+description = "Compatibility-only LamQuant Source, Sink, and WindowBatch runtime"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Quitetall/lamquant-legacy"
+
+[lib]
+name = "lamquant_runtime"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lamquant-runtimed"
+path = "src/bin/runtimed.rs"
+required-features = ["daemon"]
+
+[features]
+# Compatibility feature bundle. `--no-default-features` retains the minimal core.
+default = []
+# `codec` = the file sinks/sources that call the LML codec (compress-to-`.lml`
+# and replay-`.lml`). No system library needed — just the codec's `archive` tier.
+codec = ["dep:lamquant-core"]
+# `lsl` = live LSL inlet source + outlet sink. Needs the `liblsl` SYSTEM library
+# (the `lsl` crate links it); off by default so the crate builds everywhere.
+# Uses the crate's `liblsl` surface (Inlet/Outlet/SampleBuffer) only — NOT its
+# `async` OutletActor (that upstream module currently fails to compile); this
+# crate owns the outlet's dedicated `!Send` thread itself.
+lsl = ["codec", "dep:lamquant-visualization-lsl", "lamquant-visualization-lsl/liblsl"]
+# `daemon` = the standalone `lamquant-runtimed` binary + its Unix-socket control
+# server + append-only status persistence (hybrid control, ADR 0135). Off by
+# default so the lib stays embeddable.
+daemon = ["dep:clap"]
+# `neg` = the provenance sink — records a content-addressed NEG evidence graph
+# (ADR 0114) alongside the signal. Pure-Rust builder (serde+sha2).
+neg = ["dep:lamquant-neg", "dep:sha2"]
+# `metrics` = the observability sink — per-pipeline throughput counters served
+# on GET /metrics (Prometheus text). Hand-rolled HTTP over tokio.
+metrics = []
+# `watch` = the folder-watch source — streams the windows of every `.lml`/`.edf`
+# dropped into a directory. Needs the codec decoders + the `notify` watcher.
+watch = ["codec", "dep:notify"]
+# `auth` = daemon control-socket hardening (ADR 0116/0136): a SO_PEERCRED uid
+# gate (active) + an Ed25519 capability token (seam for non-local attach).
+auth = ["daemon", "dep:ed25519-dalek", "dep:getrandom", "dep:libc"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "net", "io-util", "signal"] }
+tokio-util = "0.7"
+async-trait = "0.1"
+thiserror = "1"
+tracing = "0.1.40"
+
+lamquant-core = { package = "lamquant-lml", git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "42a539209d3a21510412f62628103890d62478b4", default-features = false, features = ["archive"], optional = true }
+lamquant-visualization-lsl = { git = "https://github.com/Quitetall/LamQuant-Vision.git", rev = "97b5070f6716bbacd42dacbfb3939706a585990b", default-features = false, optional = true }
+lamquant-neg = { git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "42a539209d3a21510412f62628103890d62478b4", package = "lamquant-neg", optional = true }
+sha2 = { version = "0.10", optional = true }
+notify = { version = "6", default-features = false, features = ["macos_fsevent"], optional = true }
+ed25519-dalek = { version = "2.1", optional = true }
+getrandom = { version = "0.2", optional = true }
+libc = { version = "0.2", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "test-util"] }

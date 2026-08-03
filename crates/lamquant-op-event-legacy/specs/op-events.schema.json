@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openhuman.tech/schemas/lamquant/op-events.schema.json",
+  "title": "LamQuant OpEvent",
+  "description": "Wire format for events emitted by long-running LamQuant operations. All three UIs (Python TUI, Rust TUI, Tauri GUI) consume this format. The lml binary emits one JSON line per event when invoked with --emit-json-events. Schema parity is enforced by crates/lamquant-ops/tests/schema_parity.rs.",
+  "type": "object",
+  "required": ["type", "ts_ms"],
+  "properties": {
+    "type": {
+      "type": "string",
+      "enum": ["Started", "Progress", "FileDone", "Done", "Error", "Log"],
+      "description": "Discriminator for the event variant."
+    },
+    "ts_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Unix epoch milliseconds at the point of emission. Wall-clock; not adjusted for skew."
+    },
+    "op_id": {
+      "type": "string",
+      "description": "Canonical op id from specs/ui-parity.md::Op IDs. Required for Started; optional on subsequent events but recommended for filtering."
+    },
+    "total": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Started: best-effort total work units (file count, byte count). Null if unknown ahead of time."
+    },
+    "current": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Progress: completed work units."
+    },
+    "message": {
+      "type": "string",
+      "description": "Progress: human-readable status text. Log: line content. Done: summary. Error: failure description."
+    },
+    "path": {
+      "type": "string",
+      "description": "FileDone: path to the file the op completed (success or failure)."
+    },
+    "success": {
+      "type": "boolean",
+      "description": "FileDone: whether the file completed successfully."
+    },
+    "cr": {
+      "type": ["number", "null"],
+      "description": "FileDone: compression ratio (output_bytes / input_bytes). Null when not applicable (verify, info)."
+    },
+    "ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "FileDone: wall-clock milliseconds the file took."
+    },
+    "bytes_in": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "FileDone: original (uncompressed) byte size. Drives the dashboard throughput + saved-bytes display. Optional for backward compatibility."
+    },
+    "bytes_out": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "FileDone: compressed output byte size. Drives the dashboard throughput + saved-bytes display. Optional."
+    },
+    "samples": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "FileDone: total sample count for the file (n_channels * n_samples). Drives Samples + Shannon-efficiency math on the dashboard. Optional."
+    },
+    "duration_s": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "FileDone: wall-clock duration of the recording in seconds. Drives EEG hours on the dashboard / completion summary. Optional."
+    },
+    "n_channels": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "FileDone: channel count parsed from the EDF header. Drives the effective-bitrate display. Optional."
+    },
+    "sample_rate": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "FileDone: sample rate (Hz). Combined with n_channels for the kbps readout. Optional."
+    },
+    "sha256": {
+      "type": ["string", "null"],
+      "description": "FileDone: SHA-256 of the compressed file (hex-encoded). Carries integrity proof through to the audit log + manifest. Optional."
+    },
+    "n_windows": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "FileDone: number of LMQ/LML windows in the compressed file. Optional."
+    }
+  },
+  "allOf": [
+    {
+      "if":   { "properties": { "type": { "const": "Started" } } },
+      "then": { "required": ["op_id"] }
+    },
+    {
+      "if":   { "properties": { "type": { "const": "Progress" } } },
+      "then": { "required": ["current", "total", "message"] }
+    },
+    {
+      "if":   { "properties": { "type": { "const": "FileDone" } } },
+      "then": { "required": ["path", "success", "ms"] }
+    },
+    {
+      "if":   { "properties": { "type": { "const": "Done" } } },
+      "then": { "required": ["message"] }
+    },
+    {
+      "if":   { "properties": { "type": { "const": "Error" } } },
+      "then": { "required": ["message"] }
+    },
+    {
+      "if":   { "properties": { "type": { "const": "Log" } } },
+      "then": { "required": ["message"] }
+    }
+  ],
+  "additionalProperties": false
+}

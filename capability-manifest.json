@@ -7,63 +7,117 @@
       "inspect": true,
       "forensic_import": true,
       "semantic_import": true,
-      "reverse_export": true
+      "reverse_export": true,
+      "operations": [
+        "inspect",
+        "convert-forensic",
+        "import-semantic",
+        "export-semantic"
+      ]
     },
     {
       "profile": "legacy.lml1.v1",
       "inspect": true,
       "forensic_import": true,
       "semantic_import": true,
-      "reverse_export": true
+      "reverse_export": true,
+      "operations": [
+        "inspect",
+        "convert-forensic",
+        "import-semantic",
+        "export-semantic"
+      ]
     },
     {
       "profile": "legacy.lma.v1",
       "inspect": true,
       "forensic_import": true,
       "semantic_import": true,
-      "reverse_export": true
+      "reverse_export": true,
+      "operations": [
+        "inspect",
+        "convert-forensic",
+        "import-semantic",
+        "export-semantic"
+      ]
     },
     {
       "profile": "legacy.lma.v2",
       "inspect": true,
       "forensic_import": true,
       "semantic_import": true,
-      "reverse_export": true
+      "reverse_export": true,
+      "operations": [
+        "inspect",
+        "convert-forensic",
+        "import-semantic",
+        "export-semantic"
+      ]
     },
     {
       "profile": "legacy.lmqc.v1",
       "inspect": true,
       "forensic_import": true,
       "semantic_import": true,
-      "reverse_export": true
+      "reverse_export": true,
+      "operations": [
+        "inspect",
+        "convert-forensic",
+        "import-semantic",
+        "export-semantic"
+      ]
     },
     {
       "profile": "legacy.lmlcrypt.v1",
       "inspect": true,
       "forensic_import": true,
       "semantic_import": true,
-      "reverse_export": true
+      "reverse_export": true,
+      "operations": [
+        "inspect",
+        "convert-forensic",
+        "import-semantic",
+        "export-semantic"
+      ]
     },
     {
       "profile": "legacy.lqtp.v1",
       "inspect": true,
       "forensic_import": true,
       "semantic_import": true,
-      "reverse_export": true
+      "reverse_export": true,
+      "operations": [
+        "inspect",
+        "convert-forensic",
+        "import-semantic",
+        "export-semantic"
+      ]
     },
     {
       "profile": "legacy.lqtp.v2",
       "inspect": true,
       "forensic_import": true,
       "semantic_import": true,
-      "reverse_export": true
+      "reverse_export": true,
+      "operations": [
+        "inspect",
+        "convert-forensic",
+        "import-semantic",
+        "export-semantic"
+      ]
     },
     {
       "profile": "legacy.lqtp.v3",
       "inspect": true,
       "forensic_import": true,
       "semantic_import": true,
-      "reverse_export": true
+      "reverse_export": true,
+      "operations": [
+        "inspect",
+        "convert-forensic",
+        "import-semantic",
+        "export-semantic"
+      ]
     }
   ]
 }
