@@ -9,4 +9,4 @@ publish = false
 description = "Process-isolated facade for LamQuant's retired Stage and Pass API"
 
 [dependencies]
-lamquant-lml-archive.workspace = true
+lamquant-lml-archive = { package = "lamquant-lml", git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "db7ff36aff529886195e067ea9628d3e7a08cd84", default-features = false, features = ["std", "archive"] }
