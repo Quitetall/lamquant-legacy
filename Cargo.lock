@@ -1187,7 +1187,7 @@ dependencies = [
 [[package]]
 name = "lamquant-visualization"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant-Vision.git?rev=ce629a21817538414032b9bc517d947bd274f58a#ce629a21817538414032b9bc517d947bd274f58a"
+source = "git+https://github.com/Quitetall/LamQuant-Vision.git?rev=e32da0b5597dbf04351b054a37b699751c3e83df#e32da0b5597dbf04351b054a37b699751c3e83df"
 dependencies = [
  "lamquant-lml",
  "sha2",
@@ -1196,7 +1196,7 @@ dependencies = [
 [[package]]
 name = "lamquant-visualization-lsl"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant-Vision.git?rev=ce629a21817538414032b9bc517d947bd274f58a#ce629a21817538414032b9bc517d947bd274f58a"
+source = "git+https://github.com/Quitetall/LamQuant-Vision.git?rev=e32da0b5597dbf04351b054a37b699751c3e83df#e32da0b5597dbf04351b054a37b699751c3e83df"
 dependencies = [
  "lamquant-lml",
  "lamquant-visualization",
