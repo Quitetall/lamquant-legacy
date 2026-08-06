@@ -21,11 +21,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "abir"
+version = "0.1.0"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=f1cfbcb649cc4f602ffedfd4d6820e49f45a1140#f1cfbcb649cc4f602ffedfd4d6820e49f45a1140"
+dependencies = [
+ "blake3",
+ "serde_json",
+]
+
+[[package]]
 name = "abir-adapter"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=a8f0251891c07570e373230a8fed89264147e096#a8f0251891c07570e373230a8fed89264147e096"
+source = "git+https://github.com/Quitetall/ABIR.git?rev=f1cfbcb649cc4f602ffedfd4d6820e49f45a1140#f1cfbcb649cc4f602ffedfd4d6820e49f45a1140"
 dependencies = [
- "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=a8f0251891c07570e373230a8fed89264147e096)",
+ "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=f1cfbcb649cc4f602ffedfd4d6820e49f45a1140)",
  "blake3",
  "serde",
  "serde_json",
@@ -1010,7 +1019,7 @@ dependencies = [
 name = "lamquant-abir-bridge"
 version = "0.1.0"
 dependencies = [
- "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=a8f0251891c07570e373230a8fed89264147e096)",
+ "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=f1cfbcb649cc4f602ffedfd4d6820e49f45a1140)",
  "blake3",
  "bytemuck",
  "lamquant-legacy-ir",
@@ -1080,7 +1089,7 @@ dependencies = [
 name = "lamquant-legacy-adapter"
 version = "0.1.0"
 dependencies = [
- "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=a8f0251891c07570e373230a8fed89264147e096)",
+ "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=f1cfbcb649cc4f602ffedfd4d6820e49f45a1140)",
  "abir-adapter",
  "aes-gcm",
  "blake3",
@@ -1326,7 +1335,7 @@ dependencies = [
 [[package]]
 name = "lamquant-visualization"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant-Vision.git?rev=748ed5ca052cf00edea7817dd9540ed62e8c2e03#748ed5ca052cf00edea7817dd9540ed62e8c2e03"
+source = "git+https://github.com/Quitetall/LamQuant-Vision.git?rev=3def32b9fc42d6a83e108ab15d5615aa75275496#3def32b9fc42d6a83e108ab15d5615aa75275496"
 dependencies = [
  "lamquant-lml 0.9.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=6301f2e18a03aea7922af60a5f2b2af4ee153ddc)",
  "sha2",
@@ -1335,7 +1344,7 @@ dependencies = [
 [[package]]
 name = "lamquant-visualization-lsl"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant-Vision.git?rev=748ed5ca052cf00edea7817dd9540ed62e8c2e03#748ed5ca052cf00edea7817dd9540ed62e8c2e03"
+source = "git+https://github.com/Quitetall/LamQuant-Vision.git?rev=3def32b9fc42d6a83e108ab15d5615aa75275496#3def32b9fc42d6a83e108ab15d5615aa75275496"
 dependencies = [
  "lamquant-lml 0.9.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=6301f2e18a03aea7922af60a5f2b2af4ee153ddc)",
  "lamquant-visualization",
