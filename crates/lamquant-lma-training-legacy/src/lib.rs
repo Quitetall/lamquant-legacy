@@ -4374,8 +4374,33 @@ mod tests {
             "import os, pathlib, signal, sys, time\n",
             "if __name__ == '__main__':\n",
             "    workspace = pathlib.Path(os.environ['LAMQUANT_LEGACY_WORKSPACE'])\n",
+            "    done = False\n",
+            // The marker is written ATOMICALLY: temp file, fsync, rename. A
+            // reader then observes either nothing or the complete bytes, never
+            // a created-but-unwritten file. Measured 2026-08-11: this test
+            // failed roughly one run in eight with `left: []` against
+            // `right: [80, 65, 83, 83]` -- the marker present and EMPTY, which
+            // is a torn write, not a missing flush.
+            //
+            // This cannot hide a real defect. If bounded cleanup never runs,
+            // the marker is ABSENT and the assertion still fails; all that goes
+            // away is the empty-file observation, which reports a timing
+            // artefact as though the trainer had flushed nothing.
+            //
+            // `done` makes the handler idempotent, so a second delivery cannot
+            // re-enter and truncate what the first one wrote.
             "    def stop(_signal, _frame):\n",
-            "        (workspace / 'artifacts/graceful-flush').write_text('PASS')\n",
+            "        global done\n",
+            "        if done:\n",
+            "            return\n",
+            "        done = True\n",
+            "        target = workspace / 'artifacts/graceful-flush'\n",
+            "        tmp = workspace / 'artifacts/.graceful-flush.tmp'\n",
+            "        with open(tmp, 'wb') as handle:\n",
+            "            handle.write(b'PASS')\n",
+            "            handle.flush()\n",
+            "            os.fsync(handle.fileno())\n",
+            "        os.replace(tmp, target)\n",
             "        sys.exit(0)\n",
             "    signal.signal(signal.SIGTERM, stop)\n",
             "    (workspace / 'artifacts/ready').write_text('READY')\n",
