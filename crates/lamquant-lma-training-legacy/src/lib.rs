@@ -748,12 +748,22 @@ fn configure_owned_process_group(command: &mut Command) {
 struct SupervisedChild {
     child: Child,
     process_group: libc::pid_t,
+    signal_target: SignalTarget,
     active: bool,
     _process_lock: MutexGuard<'static, ()>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SignalTarget {
+    ProcessGroup,
+    SandboxCommand,
+}
+
 impl SupervisedChild {
-    fn spawn(mut command: Command) -> Result<Self, io::Error> {
+    fn spawn_with_target(
+        mut command: Command,
+        signal_target: SignalTarget,
+    ) -> Result<Self, io::Error> {
         let process_lock = PROCESS_SUPERVISION_LOCK
             .lock()
             .map_err(|_| io::Error::other("legacy subprocess supervision lock is poisoned"))?;
@@ -778,6 +788,7 @@ impl SupervisedChild {
         Ok(Self {
             child,
             process_group,
+            signal_target,
             active: true,
             _process_lock: process_lock,
         })
@@ -794,7 +805,7 @@ impl SupervisedChild {
             if forwarded_signal.is_none() {
                 let signal = PENDING_TERMINATION_SIGNAL.swap(0, Ordering::AcqRel);
                 if signal != 0 {
-                    self.forward_signal(signal);
+                    self.forward_requested_signal(signal);
                     forwarded_signal = Some(signal);
                     termination_deadline = Instant::now().checked_add(TERMINATION_GRACE);
                 }
@@ -815,7 +826,7 @@ impl SupervisedChild {
 
     fn terminate_and_wait(&mut self) {
         if self.active {
-            self.forward_signal(libc::SIGKILL);
+            self.forward_group_signal(libc::SIGKILL);
             let _ = self.child.wait();
             self.finish_group();
         }
@@ -826,7 +837,16 @@ impl SupervisedChild {
         status
     }
 
-    fn forward_signal(&self, signal: libc::c_int) {
+    fn forward_requested_signal(&self, signal: libc::c_int) {
+        if self.signal_target == SignalTarget::SandboxCommand
+            && signal_sandbox_commands(self.process_group, signal)
+        {
+            return;
+        }
+        self.forward_group_signal(signal);
+    }
+
+    fn forward_group_signal(&self, signal: libc::c_int) {
         unsafe {
             libc::kill(-self.process_group, signal);
         }
@@ -837,13 +857,13 @@ impl SupervisedChild {
             return;
         }
         if process_group_exists(self.process_group) {
-            self.forward_signal(libc::SIGTERM);
+            self.forward_group_signal(libc::SIGTERM);
             let deadline = Instant::now() + DESCENDANT_GRACE;
             while Instant::now() < deadline && process_group_exists(self.process_group) {
                 std::thread::sleep(POLL_INTERVAL);
             }
             if process_group_exists(self.process_group) {
-                self.forward_signal(libc::SIGKILL);
+                self.forward_group_signal(libc::SIGKILL);
                 let deadline = Instant::now() + DESCENDANT_GRACE;
                 while Instant::now() < deadline && process_group_exists(self.process_group) {
                     std::thread::sleep(POLL_INTERVAL);
@@ -871,14 +891,173 @@ fn process_group_exists(process_group: libc::pid_t) -> bool {
     result == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+fn direct_child_pids(parent: libc::pid_t) -> Option<Vec<libc::pid_t>> {
+    const MAX_CHILDREN_BYTES: u64 = 4096;
+    let path = format!("/proc/{parent}/task/{parent}/children");
+    let input = fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    if input
+        .take(MAX_CHILDREN_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() as u64 > MAX_CHILDREN_BYTES
+    {
+        return None;
+    }
+    let children = std::str::from_utf8(&bytes).ok()?;
+    children
+        .split_ascii_whitespace()
+        .map(|value| value.parse::<libc::pid_t>().ok().filter(|pid| *pid > 0))
+        .collect()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProcessSnapshot {
+    executable: (u64, u64),
+    parent: libc::pid_t,
+    process_group: libc::pid_t,
+    start_time: u64,
+}
+
+fn process_snapshot(pid: libc::pid_t) -> Option<ProcessSnapshot> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let fields = stat
+        .rsplit_once(") ")?
+        .1
+        .split_ascii_whitespace()
+        .collect::<Vec<_>>();
+    if fields.len() <= 19 {
+        return None;
+    }
+    let executable = fs::metadata(format!("/proc/{pid}/exe")).ok()?;
+    Some(ProcessSnapshot {
+        executable: (executable.dev(), executable.ino()),
+        parent: fields[1].parse().ok()?,
+        process_group: fields[2].parse().ok()?,
+        start_time: fields[19].parse().ok()?,
+    })
+}
+
+#[derive(Debug)]
+struct TrackedSandboxProcess {
+    pid: libc::pid_t,
+    snapshot: ProcessSnapshot,
+    descriptor: fs::File,
+}
+
+fn open_tracked_sandbox_process(
+    pid: libc::pid_t,
+    expected_parent: Option<libc::pid_t>,
+    expected_group: libc::pid_t,
+) -> Option<TrackedSandboxProcess> {
+    let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) as libc::c_int };
+    if descriptor < 0 {
+        return None;
+    }
+    // SAFETY: pidfd_open returned a new owned descriptor.
+    let descriptor = unsafe { fs::File::from_raw_fd(descriptor) };
+    let snapshot = process_snapshot(pid)?;
+    if expected_parent.is_some_and(|parent| snapshot.parent != parent)
+        || snapshot.process_group != expected_group
+    {
+        return None;
+    }
+    Some(TrackedSandboxProcess {
+        pid,
+        snapshot,
+        descriptor,
+    })
+}
+
+fn tracked_direct_children(
+    parent: &TrackedSandboxProcess,
+    process_group: libc::pid_t,
+    remaining_processes: &mut usize,
+) -> Option<Vec<TrackedSandboxProcess>> {
+    let child_pids = direct_child_pids(parent.pid)?;
+    if child_pids.len() > *remaining_processes {
+        return None;
+    }
+    let children = child_pids
+        .into_iter()
+        .map(|pid| open_tracked_sandbox_process(pid, Some(parent.pid), process_group))
+        .collect::<Option<Vec<_>>>()?;
+    if process_snapshot(parent.pid)? != parent.snapshot {
+        return None;
+    }
+    *remaining_processes -= children.len();
+    Some(children)
+}
+
+fn sandbox_command_processes(parent: libc::pid_t) -> Option<Vec<TrackedSandboxProcess>> {
+    const MAX_SANDBOX_DEPTH: usize = 8;
+    const MAX_SANDBOX_PROCESSES: usize = 256;
+    let launcher = open_tracked_sandbox_process(parent, None, parent)?;
+    let launcher_identity = launcher.snapshot.executable;
+    let mut remaining_processes = MAX_SANDBOX_PROCESSES.checked_sub(1)?;
+    let mut frontier = tracked_direct_children(&launcher, parent, &mut remaining_processes)?;
+    let mut commands = Vec::new();
+    for _ in 0..MAX_SANDBOX_DEPTH {
+        if frontier.is_empty() {
+            return Some(commands);
+        }
+        let mut next = Vec::new();
+        for process in frontier {
+            if process.snapshot.executable == launcher_identity {
+                next.extend(tracked_direct_children(
+                    &process,
+                    parent,
+                    &mut remaining_processes,
+                )?);
+            } else {
+                commands.push(process);
+            }
+        }
+        frontier = next;
+    }
+    frontier.is_empty().then_some(commands)
+}
+
+fn signal_sandbox_commands(parent: libc::pid_t, signal: libc::c_int) -> bool {
+    let Some(commands) = sandbox_command_processes(parent) else {
+        return false;
+    };
+    if commands.is_empty() {
+        return false;
+    }
+    for command in commands {
+        let Some(current) = process_snapshot(command.pid) else {
+            return false;
+        };
+        if current != command.snapshot {
+            return false;
+        }
+        // Discovery retained this pidfd before classifying the executable. PID
+        // reuse therefore cannot redirect delivery to another host process.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                command.descriptor.as_raw_fd(),
+                signal,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        };
+        if result != 0 {
+            return false;
+        }
+    }
+    true
+}
+
 impl Drop for SupervisedChild {
     fn drop(&mut self) {
         self.terminate_and_wait();
     }
 }
 
-fn supervised_status(command: Command) -> Result<ExitStatus, io::Error> {
-    SupervisedChild::spawn(command)?.wait()
+fn supervised_sandbox_status(command: Command) -> Result<ExitStatus, io::Error> {
+    SupervisedChild::spawn_with_target(command, SignalTarget::SandboxCommand)?.wait()
 }
 
 fn validate_git_executable(git: &OsStr) -> Result<PathBuf, VerificationError> {
@@ -1307,7 +1486,7 @@ fn launch_verified_at(
     )?;
     sandbox.revalidate()?;
     python.revalidate()?;
-    let status = supervised_status(python_command(
+    let status = supervised_sandbox_status(python_command(
         &workspace,
         &sandbox,
         &python,
@@ -3184,7 +3363,7 @@ fn dependency_preflight(
         .arg(workspace.script())
         .arg(workspace.virtual_script())
         .args(modules);
-    let (status, stdout, stderr) = bounded_command_output(
+    let (status, stdout, stderr) = bounded_sandbox_command_output(
         command,
         MAX_PREFLIGHT_OUTPUT_BYTES,
         PREFLIGHT_TIMEOUT,
@@ -3326,13 +3505,50 @@ fn bounded_command_output(
     supervised_command_output(command, limit, limit, timeout, None, label)
 }
 
+fn bounded_sandbox_command_output(
+    command: Command,
+    limit: usize,
+    timeout: Duration,
+    label: &'static str,
+) -> Result<(ExitStatus, Vec<u8>, Vec<u8>), io::Error> {
+    supervised_command_output_with_target(
+        command,
+        limit,
+        limit,
+        timeout,
+        None,
+        label,
+        SignalTarget::SandboxCommand,
+    )
+}
+
 fn supervised_command_output(
+    command: Command,
+    stdout_limit: usize,
+    stderr_limit: usize,
+    timeout: Duration,
+    stdin: Option<Vec<u8>>,
+    label: &'static str,
+) -> Result<(ExitStatus, Vec<u8>, Vec<u8>), io::Error> {
+    supervised_command_output_with_target(
+        command,
+        stdout_limit,
+        stderr_limit,
+        timeout,
+        stdin,
+        label,
+        SignalTarget::ProcessGroup,
+    )
+}
+
+fn supervised_command_output_with_target(
     mut command: Command,
     stdout_limit: usize,
     stderr_limit: usize,
     timeout: Duration,
     stdin: Option<Vec<u8>>,
     label: &'static str,
+    signal_target: SignalTarget,
 ) -> Result<(ExitStatus, Vec<u8>, Vec<u8>), io::Error> {
     command
         .stdin(if stdin.is_some() {
@@ -3342,7 +3558,7 @@ fn supervised_command_output(
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = SupervisedChild::spawn(command)?;
+    let mut child = SupervisedChild::spawn_with_target(command, signal_target)?;
     let mut stdin_pipe = if let Some(input) = stdin {
         let pipe = child
             .child
@@ -3380,7 +3596,7 @@ fn supervised_command_output(
         if forwarded_signal.is_none() {
             let signal = PENDING_TERMINATION_SIGNAL.swap(0, Ordering::AcqRel);
             if signal != 0 {
-                child.forward_signal(signal);
+                child.forward_requested_signal(signal);
                 forwarded_signal = Some(signal);
                 termination_deadline = Instant::now().checked_add(TERMINATION_GRACE);
             }
@@ -4369,6 +4585,43 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_signal_target_excludes_the_process_group_leader() {
+        fn process_state(pid: libc::pid_t) -> Option<char> {
+            let status = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            status.rsplit_once(") ")?.1.chars().next()
+        }
+
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 60 & wait"]);
+        let mut supervised =
+            SupervisedChild::spawn_with_target(command, SignalTarget::SandboxCommand)
+                .expect("spawn leader with direct child");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let direct_child = loop {
+            if let Some(child) = direct_child_pids(supervised.process_group)
+                .and_then(|children| children.into_iter().next())
+            {
+                break child;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "leader never spawned direct child"
+            );
+            std::thread::sleep(POLL_INTERVAL);
+        };
+
+        supervised.forward_requested_signal(libc::SIGSTOP);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && process_state(direct_child) != Some('T') {
+            std::thread::sleep(POLL_INTERVAL);
+        }
+
+        assert_eq!(process_state(direct_child), Some('T'));
+        assert_ne!(process_state(supervised.process_group), Some('T'));
+        supervised.terminate_and_wait();
+    }
+
+    #[test]
     fn termination_signal_allows_bounded_trainer_cleanup() {
         let checkout = fixture_checkout(concat!(
             "import os, pathlib, signal, sys, time\n",
@@ -4428,8 +4681,9 @@ mod tests {
         let sandbox = validate_sandbox_executable().expect("validate sandbox");
         let python = validate_python_interpreter(absolute_python().as_os_str())
             .expect("validate Python interpreter");
-        let status = supervised_status(python_command(&workspace, &sandbox, &python, &[], &[]))
-            .expect("signal-supervised trainer");
+        let status =
+            supervised_sandbox_status(python_command(&workspace, &sandbox, &python, &[], &[]))
+                .expect("signal-supervised trainer");
         sender.join().expect("signal sender");
 
         assert_eq!(status.code(), Some(128 + libc::SIGTERM));
