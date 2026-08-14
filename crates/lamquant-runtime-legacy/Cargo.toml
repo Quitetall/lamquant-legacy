@@ -60,7 +60,7 @@ thiserror = "1"
 tracing = "0.1.40"
 
 lamquant-core = { package = "lamquant-lml", git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "83a90ddb8e8d39522827bc0abab164f756743f15", default-features = false, features = ["archive"], optional = true }
-lamquant-visualization-lsl = { git = "https://github.com/Quitetall/LamQuant-Vision.git", rev = "cdf4042c064d1890863e1fc58d29026bc9b6265c", default-features = false, optional = true }
+lamquant-visualization-lsl = { git = "https://github.com/Quitetall/LamQuant-Vision.git", rev = "132a4ed9aa45eb7faeac38c195459a369f83e996", default-features = false, optional = true }
 lamquant-neg = { git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "83a90ddb8e8d39522827bc0abab164f756743f15", package = "lamquant-neg", optional = true }
 sha2 = { version = "0.10", optional = true }
 notify = { version = "6", default-features = false, features = ["macos_fsevent"], optional = true }
