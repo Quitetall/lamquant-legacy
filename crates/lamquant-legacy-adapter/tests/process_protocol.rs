@@ -429,6 +429,15 @@ fn lml1_synthetic_materialization_re_emits_exact_ascii_source() {
     assert!(receipt.exact_original_bytes);
     assert_eq!(fs::read(&source).unwrap()[..4], *b"LML1");
 
+    let staged_destination = temp.path().join("staged-original.txt");
+    let mut supervised = request.clone();
+    supervised.destination = staged_destination.clone();
+    supervised.expected_sha256 = None;
+    let staged_receipt = materialize_synthetic_exact(&supervised).unwrap();
+    assert_eq!(fs::read(staged_destination).unwrap(), original);
+    assert!(!staged_receipt.exact_original_bytes);
+    assert_eq!(staged_receipt.output_sha256, receipt.output_sha256);
+
     let wire =
         serde_json::to_value(ProcessRequest::MaterializeSyntheticExact(request.clone())).unwrap();
     assert_eq!(wire["operation"], "materialize-synthetic-exact");

@@ -145,8 +145,10 @@ pub struct MaterializeRequest {
     pub source: PathBuf,
     pub destination: PathBuf,
     pub accept_fidelity: bool,
-    /// Optional archive SHA-256. When absent, supervising caller must verify
-    /// returned bytes against its own logical content identity before publish.
+    /// Optional archive SHA-256. When absent, supervising caller must provide
+    /// a caller-owned staging destination, verify returned bytes against its
+    /// own logical content identity, then publish through its own no-clobber
+    /// path. Adapter success alone never promotes staged bytes.
     pub expected_sha256: Option<String>,
     pub original_size: u64,
     pub max_source_bytes: u64,
@@ -167,8 +169,10 @@ pub struct SyntheticMaterializeRequest {
     pub source: PathBuf,
     pub destination: PathBuf,
     pub accept_fidelity: bool,
-    /// Optional archive SHA-256. When absent, supervising caller must verify
-    /// returned bytes against its own logical content identity before publish.
+    /// Optional archive SHA-256. When absent, supervising caller must provide
+    /// a caller-owned staging destination, verify returned bytes against its
+    /// own logical content identity, then publish through its own no-clobber
+    /// path. Adapter success alone never promotes staged bytes.
     pub expected_sha256: Option<String>,
     pub original_size: u64,
     pub max_source_bytes: u64,
