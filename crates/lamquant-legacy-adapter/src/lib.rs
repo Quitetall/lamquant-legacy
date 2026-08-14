@@ -762,16 +762,7 @@ pub fn materialize_exact(request: &MaterializeRequest) -> Result<MaterializeRece
     if request.original_size > request.max_output_bytes {
         return Err(LegacyError::OutputTooLarge);
     }
-    if request.expected_sha256.len() != 64
-        || !request
-            .expected_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(LegacyError::InvalidProtocol(
-            "expected_sha256 must be 64 lowercase hexadecimal characters".to_owned(),
-        ));
-    }
+    validate_expected_sha256(&request.expected_sha256)?;
 
     let source = read_bounded(&request.source, request.max_source_bytes)?;
     if detect_format(&source)? != LegacyFormat::Lml1 {

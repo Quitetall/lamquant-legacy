@@ -241,6 +241,38 @@ Publication produces only complete file bytes and is restartable, but does not
 claim directory-entry durability across sudden power loss. Verify the receipt
 before retiring any source archive.
 
+Retired LMA archives may also carry a reversible descriptor for synthetic
+integer-line sources. Those frames use a separate operation so ordinary EDF
+materialization never changes meaning:
+
+```json
+{
+  "operation": "materialize-synthetic-exact",
+  "source": "/input/inner-frame.lml",
+  "destination": "/output/original.txt",
+  "accept_fidelity": true,
+  "expected_sha256": "<archive-manifest-sha256>",
+  "original_size": 123456,
+  "max_source_bytes": 123456,
+  "max_decoded_bytes": 987648,
+  "max_intermediate_bytes": 987648,
+  "max_output_bytes": 123456,
+  "format": "ascii_int_lines",
+  "template": {
+    "line_ending": "CrLf",
+    "leading_whitespace": 2,
+    "field_width": 4,
+    "trailing_newline": false
+  }
+}
+```
+
+Adapter reconstructs bounded one-channel intermediate EDF, renders declared
+template, then checks original byte count and SHA-256 before no-clobber
+publication. Only `Lf` and `CrLf` line endings are accepted. Template widths
+are bounded `u8` values; `max_intermediate_bytes` and `max_output_bytes` remain
+independent limits.
+
 An export request names every payload rather than trusting directory layout:
 
 ```json

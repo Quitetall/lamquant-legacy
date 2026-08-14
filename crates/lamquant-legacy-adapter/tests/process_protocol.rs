@@ -401,6 +401,15 @@ fn lml1_synthetic_materialization_re_emits_exact_ascii_source() {
     assert!(receipt.exact_original_bytes);
     assert_eq!(fs::read(&source).unwrap()[..4], *b"LML1");
 
+    let wire =
+        serde_json::to_value(ProcessRequest::MaterializeSyntheticExact(request.clone())).unwrap();
+    assert_eq!(wire["operation"], "materialize-synthetic-exact");
+    assert_eq!(wire["format"], "ascii_int_lines");
+    assert_eq!(wire["template"]["line_ending"], "CrLf");
+    let response = handle(serde_json::from_value(wire).unwrap());
+    assert!(matches!(response, ProcessResponse::OkMaterialization(_)));
+    assert_eq!(fs::read(&destination).unwrap(), original);
+
     let amplified_destination = temp.path().join("amplified.txt");
     let mut amplified = request.clone();
     amplified.destination = amplified_destination.clone();
