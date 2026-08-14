@@ -155,6 +155,50 @@ pub struct MaterializeRequest {
     pub max_output_bytes: u64,
 }
 
+/// Request exact re-emission of a non-EDF source represented by retired LML1.
+///
+/// LMA stored the synthetic-source descriptor beside the LML frame. Keeping
+/// this as a separate operation prevents an old materialize-exact caller from
+/// silently changing meaning.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SyntheticMaterializeRequest {
+    pub source: PathBuf,
+    pub destination: PathBuf,
+    pub accept_fidelity: bool,
+    pub expected_sha256: String,
+    pub original_size: u64,
+    pub max_source_bytes: u64,
+    pub max_decoded_bytes: u64,
+    pub max_intermediate_bytes: u64,
+    pub max_output_bytes: u64,
+    #[serde(flatten)]
+    pub synthetic: SyntheticTemplate,
+}
+
+/// Closed set of reversible synthetic-source templates understood by this
+/// retired decoder. The flattened serde shape preserves the historical
+/// `format` + `template` process fields while rejecting invalid pairings.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "format", content = "template")]
+pub enum SyntheticTemplate {
+    #[serde(rename = "ascii_int_lines")]
+    AsciiIntLines(AsciiIntLinesTemplate),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AsciiIntLinesTemplate {
+    pub line_ending: SyntheticLineEnding,
+    pub leading_whitespace: u8,
+    pub field_width: u8,
+    pub trailing_newline: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum SyntheticLineEnding {
+    Lf,
+    CrLf,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MaterializeReceipt {
     pub profile: String,
@@ -293,6 +337,7 @@ fn capability_operations(
     }
     if exact_materialization {
         operations.push("materialize-exact".to_owned());
+        operations.push("materialize-synthetic-exact".to_owned());
     }
     if semantic_import {
         operations.push("import-semantic".to_owned());
@@ -320,6 +365,7 @@ pub enum ProcessRequest {
     },
     ConvertForensic(ConvertRequest),
     MaterializeExact(MaterializeRequest),
+    MaterializeSyntheticExact(SyntheticMaterializeRequest),
     ImportSemantic(SemanticImportRequest),
     ExportSemantic(SemanticExportRequest),
 }
@@ -733,7 +779,7 @@ pub fn materialize_exact(request: &MaterializeRequest) -> Result<MaterializeRece
     }
     let output = reconstruct_lml1_file(
         &source,
-        request.original_size,
+        Some(request.original_size),
         request.max_decoded_bytes,
         request.max_output_bytes,
     )?;
@@ -751,29 +797,118 @@ pub fn materialize_exact(request: &MaterializeRequest) -> Result<MaterializeRece
         exact_original_bytes: true,
     };
 
-    if request.destination.exists() {
-        let existing = read_bounded(&request.destination, request.max_output_bytes)
+    publish_materialized(
+        &request.destination,
+        &output,
+        request.max_output_bytes,
+        receipt,
+    )
+}
+
+/// Decode a retired LML1 synthetic EDF and re-emit its exact original bytes.
+pub fn materialize_synthetic_exact(
+    request: &SyntheticMaterializeRequest,
+) -> Result<MaterializeReceipt, LegacyError> {
+    use sha2::Digest;
+
+    if !request.accept_fidelity {
+        return Err(LegacyError::AcceptanceRequired);
+    }
+    if request.original_size > request.max_output_bytes {
+        return Err(LegacyError::OutputTooLarge);
+    }
+    validate_expected_sha256(&request.expected_sha256)?;
+    let source = read_bounded(&request.source, request.max_source_bytes)?;
+    if detect_format(&source)? != LegacyFormat::Lml1 {
+        return Err(LegacyError::MaterializationUnsupported);
+    }
+    let intermediate = reconstruct_lml1_file(
+        &source,
+        None,
+        request.max_decoded_bytes,
+        request.max_intermediate_bytes,
+    )?;
+    let output = re_emit_synthetic(
+        &intermediate,
+        &request.synthetic,
+        request.original_size,
+        request.max_output_bytes,
+    )?;
+    if output.len() as u64 != request.original_size
+        || output.len() as u64 > request.max_output_bytes
+    {
+        return Err(LegacyError::OutputIdentityMismatch);
+    }
+    let output_sha256 = format!("{:x}", sha2::Sha256::digest(&output));
+    if output_sha256 != request.expected_sha256 {
+        return Err(LegacyError::OutputIdentityMismatch);
+    }
+    let receipt = MaterializeReceipt {
+        profile: LegacyFormat::Lml1.profile().to_owned(),
+        source_blake3: blake3::hash(&source).to_hex().to_string(),
+        source_bytes: source.len() as u64,
+        output_sha256,
+        output_bytes: output.len() as u64,
+        source_preserved: true,
+        exact_original_bytes: true,
+    };
+    publish_materialized(
+        &request.destination,
+        &output,
+        request.max_output_bytes,
+        receipt,
+    )
+}
+
+fn validate_expected_sha256(expected: &str) -> Result<(), LegacyError> {
+    if expected.len() != 64
+        || !expected
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(LegacyError::InvalidProtocol(
+            "expected_sha256 must be 64 lowercase hexadecimal characters".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn publish_materialized(
+    destination: &Path,
+    output: &[u8],
+    max_output_bytes: u64,
+    receipt: MaterializeReceipt,
+) -> Result<MaterializeReceipt, LegacyError> {
+    if destination.exists() {
+        let existing = read_bounded(destination, max_output_bytes)
             .map_err(|_| LegacyError::DestinationConflict)?;
         return if existing == output {
+            let parent = destination
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            sync_directory(parent)?;
             Ok(receipt)
         } else {
             Err(LegacyError::DestinationConflict)
         };
     }
-    let parent = request
-        .destination
+    let parent = destination
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent).map_err(io_error)?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(io_error)?;
-    temporary.write_all(&output).map_err(io_error)?;
+    temporary.write_all(output).map_err(io_error)?;
     temporary.as_file_mut().sync_all().map_err(io_error)?;
-    match temporary.persist_noclobber(&request.destination) {
-        Ok(_) => Ok(receipt),
+    match temporary.persist_noclobber(destination) {
+        Ok(_) => {
+            sync_directory(parent)?;
+            Ok(receipt)
+        }
         Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
             drop(error.file);
-            let existing = read_bounded(&request.destination, request.max_output_bytes)
+            let existing = read_bounded(destination, max_output_bytes)
                 .map_err(|_| LegacyError::DestinationConflict)?;
             if existing == output {
                 Ok(receipt)
@@ -785,9 +920,21 @@ pub fn materialize_exact(request: &MaterializeRequest) -> Result<MaterializeRece
     }
 }
 
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<(), LegacyError> {
+    fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(io_error)
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<(), LegacyError> {
+    Ok(())
+}
+
 fn reconstruct_lml1_file(
     source: &[u8],
-    original_size: u64,
+    original_size: Option<u64>,
     max_decoded_bytes: u64,
     max_output_bytes: u64,
 ) -> Result<Vec<u8>, LegacyError> {
@@ -880,11 +1027,6 @@ fn reconstruct_lml1_file(
     if u64::try_from(fixed_output).map_err(|_| LegacyError::OutputTooLarge)? > max_output_bytes {
         return Err(LegacyError::OutputTooLarge);
     }
-    let original_len = usize::try_from(original_size).map_err(|_| LegacyError::OutputTooLarge)?;
-    if fixed_output > original_len {
-        return Err(LegacyError::OutputIdentityMismatch);
-    }
-
     let mut non_eeg = std::collections::BTreeMap::new();
     if let Some(channels) = metadata.get("non_eeg_channels").and_then(Value::as_object) {
         for (channel, encoded) in channels {
@@ -934,6 +1076,29 @@ fn reconstruct_lml1_file(
         }
     }
 
+    let trailing = match metadata.get("trailing_data").and_then(Value::as_str) {
+        None | Some("") => Vec::new(),
+        Some(encoded) => {
+            let compressed = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+            decode_zstd_bounded(
+                &compressed,
+                max_output_bytes.saturating_sub(fixed_output as u64),
+                "trailing EDF data",
+            )?
+        }
+    };
+    let materialized_len = fixed_output
+        .checked_add(trailing.len())
+        .ok_or(LegacyError::OutputTooLarge)?;
+    let original_len = match original_size {
+        Some(size) => usize::try_from(size).map_err(|_| LegacyError::OutputTooLarge)?,
+        None => materialized_len,
+    };
+    if materialized_len > original_len || original_len as u64 > max_output_bytes {
+        return Err(LegacyError::OutputIdentityMismatch);
+    }
     if original_len > isize::MAX as usize {
         return Err(LegacyError::OutputTooLarge);
     }
@@ -997,27 +1162,99 @@ fn reconstruct_lml1_file(
         }
     }
 
-    let trailing = match metadata.get("trailing_data").and_then(Value::as_str) {
-        None | Some("") => Vec::new(),
-        Some(encoded) => {
-            let compressed = base64::engine::general_purpose::STANDARD
-                .decode(encoded)
-                .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
-            decode_zstd_bounded(
-                &compressed,
-                max_output_bytes.saturating_sub(fixed_output as u64),
-                "trailing EDF data",
-            )?
-        }
-    };
-    let materialized_len = fixed_output
-        .checked_add(trailing.len())
-        .ok_or(LegacyError::OutputTooLarge)?;
-    if materialized_len > original_len {
-        return Err(LegacyError::OutputIdentityMismatch);
-    }
     output[fixed_output..materialized_len].copy_from_slice(&trailing);
     Ok(output)
+}
+
+fn re_emit_synthetic(
+    edf: &[u8],
+    synthetic: &SyntheticTemplate,
+    expected_output_bytes: u64,
+    max_output_bytes: u64,
+) -> Result<Vec<u8>, LegacyError> {
+    let SyntheticTemplate::AsciiIntLines(template) = synthetic;
+    if edf.len() < 256 || edf[0] == 0xff {
+        return Err(LegacyError::MalformedContainer(
+            "synthetic source is not an EDF recording".to_owned(),
+        ));
+    }
+    let header_len = std::str::from_utf8(&edf[184..192])
+        .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?
+        .trim()
+        .parse::<usize>()
+        .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+    let signals = std::str::from_utf8(&edf[252..256])
+        .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?
+        .trim()
+        .parse::<usize>()
+        .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+    if header_len != 512 || signals != 1 || edf.len() < header_len {
+        return Err(LegacyError::MalformedContainer(
+            "synthetic ASCII source has an unexpected EDF layout".to_owned(),
+        ));
+    }
+    let sample_bytes = &edf[header_len..];
+    if sample_bytes.len() % 2 != 0 {
+        return Err(LegacyError::MalformedContainer(
+            "synthetic EDF sample section has odd length".to_owned(),
+        ));
+    }
+    let line_ending = match template.line_ending {
+        SyntheticLineEnding::Lf => b"\n".as_slice(),
+        SyntheticLineEnding::CrLf => b"\r\n".as_slice(),
+    };
+    let rendered_len = sample_bytes
+        .chunks_exact(2)
+        .try_fold(0_usize, |total, chunk| {
+            let value_len = signed_decimal_len(i16::from_le_bytes([chunk[0], chunk[1]]));
+            total
+                .checked_add(template.leading_whitespace as usize)
+                .and_then(|total| total.checked_add(value_len.max(template.field_width as usize)))
+                .and_then(|total| total.checked_add(line_ending.len()))
+                .ok_or(LegacyError::OutputTooLarge)
+        })?;
+    let rendered_len = if template.trailing_newline || sample_bytes.is_empty() {
+        rendered_len
+    } else {
+        rendered_len
+            .checked_sub(line_ending.len())
+            .ok_or(LegacyError::OutputIdentityMismatch)?
+    };
+    if rendered_len as u64 > max_output_bytes {
+        return Err(LegacyError::OutputTooLarge);
+    }
+    if rendered_len as u64 != expected_output_bytes {
+        return Err(LegacyError::OutputIdentityMismatch);
+    }
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(rendered_len)
+        .map_err(|_| LegacyError::OutputTooLarge)?;
+    for chunk in sample_bytes.chunks_exact(2) {
+        output.extend(std::iter::repeat(b' ').take(template.leading_whitespace as usize));
+        let value = i16::from_le_bytes([chunk[0], chunk[1]]);
+        let value_len = signed_decimal_len(value);
+        if value_len < template.field_width as usize {
+            output.extend(std::iter::repeat(b' ').take(template.field_width as usize - value_len));
+        }
+        write!(&mut output, "{value}").map_err(io_error)?;
+        output.extend_from_slice(line_ending);
+    }
+    if !template.trailing_newline {
+        output.truncate(output.len().saturating_sub(line_ending.len()));
+    }
+    debug_assert_eq!(output.len(), rendered_len);
+    Ok(output)
+}
+
+fn signed_decimal_len(value: i16) -> usize {
+    let mut magnitude = i32::from(value).unsigned_abs();
+    let mut digits = 1_usize;
+    while magnitude >= 10 {
+        magnitude /= 10;
+        digits += 1;
+    }
+    digits + usize::from(value.is_negative())
 }
 
 fn required_usize(metadata: &Value, field: &str) -> Result<usize, LegacyError> {
@@ -3650,6 +3887,9 @@ pub fn handle(request: ProcessRequest) -> ProcessResponse {
         ProcessRequest::MaterializeExact(request) => {
             materialize_exact(&request).map(ProcessResponse::OkMaterialization)
         }
+        ProcessRequest::MaterializeSyntheticExact(request) => {
+            materialize_synthetic_exact(&request).map(ProcessResponse::OkMaterialization)
+        }
         ProcessRequest::ImportSemantic(request) => {
             import_semantic(&request).map(ProcessResponse::OkSemanticImport)
         }
@@ -3676,7 +3916,7 @@ fn read_bounded(path: &Path, max_source_bytes: u64) -> Result<Vec<u8>, LegacyErr
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
     }
     let file = options.open(path).map_err(|error| {
         if is_symlink_error(&error) {

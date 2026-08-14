@@ -27,6 +27,7 @@
         "inspect",
         "convert-forensic",
         "materialize-exact",
+        "materialize-synthetic-exact",
         "import-semantic",
         "export-semantic"
       ]

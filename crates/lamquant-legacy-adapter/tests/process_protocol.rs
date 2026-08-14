@@ -1,8 +1,9 @@
 use lamquant_legacy_adapter::{
     capability_manifest, convert_forensic, detect_format, export_semantic, handle, import_semantic,
-    inspect, materialize_exact, Capability, ConvertRequest, ExportPayload, LegacyError,
-    LegacyFormat, MaterializeRequest, ProcessRequest, ProcessResponse, SemanticExportRequest,
-    SemanticImportRequest,
+    inspect, materialize_exact, materialize_synthetic_exact, AsciiIntLinesTemplate, Capability,
+    ConvertRequest, ExportPayload, LegacyError, LegacyFormat, MaterializeRequest, ProcessRequest,
+    ProcessResponse, SemanticExportRequest, SemanticImportRequest, SyntheticLineEnding,
+    SyntheticMaterializeRequest, SyntheticTemplate,
 };
 use lamquant_legacy_ir::{Bcs1Header, BCS1_VERSION_MAJOR, BCS1_VERSION_MINOR, CODEC_LML_53};
 use sha2::{Digest, Sha256};
@@ -340,6 +341,100 @@ fn lml1_exact_materialization_is_bounded_no_clobber_and_idempotent() {
         Err(LegacyError::DestinationConflict)
     );
     assert_eq!(fs::read(&source).unwrap(), lml);
+}
+
+#[test]
+fn lml1_synthetic_materialization_re_emits_exact_ascii_source() {
+    use base64::Engine;
+
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("synthetic.lml");
+    let destination = temp.path().join("original.txt");
+    let signal = vec![vec![-12_i64, 0, 34]];
+    let mut header = vec![b' '; 512];
+    header[..8].copy_from_slice(b"0       ");
+    header[184..192].copy_from_slice(b"512     ");
+    header[236..244].copy_from_slice(b"1       ");
+    header[244..252].copy_from_slice(b"1       ");
+    header[252..256].copy_from_slice(b"1   ");
+    let metadata = serde_json::json!({
+        "edf_header": base64::engine::general_purpose::STANDARD
+            .encode(zstd::encode_all(header.as_slice(), 1).unwrap()),
+        "edf_header_sha256": format!("{:x}", Sha256::digest(&header)),
+        "n_data_records": 1,
+        "all_ns_per_rec": [3],
+        "eeg_channel_indices": [0],
+        "non_eeg_channels": {},
+        "trailing_data": ""
+    });
+    lamquant_lml_legacy::container::write_file(
+        &source,
+        &signal,
+        250.0,
+        3,
+        0,
+        &serde_json::to_string(&metadata).unwrap(),
+    )
+    .unwrap();
+    let original = b"   -12\r\n     0\r\n    34";
+    let request = SyntheticMaterializeRequest {
+        source: source.clone(),
+        destination: destination.clone(),
+        accept_fidelity: true,
+        expected_sha256: format!("{:x}", Sha256::digest(original)),
+        original_size: original.len() as u64,
+        max_source_bytes: fs::metadata(&source).unwrap().len(),
+        max_decoded_bytes: 1024 * 1024,
+        max_intermediate_bytes: 1024 * 1024,
+        max_output_bytes: original.len() as u64,
+        synthetic: SyntheticTemplate::AsciiIntLines(AsciiIntLinesTemplate {
+            line_ending: SyntheticLineEnding::CrLf,
+            leading_whitespace: 2,
+            field_width: 4,
+            trailing_newline: false,
+        }),
+    };
+
+    let receipt = materialize_synthetic_exact(&request).unwrap();
+    assert_eq!(fs::read(&destination).unwrap(), original);
+    assert_eq!(receipt.output_sha256, request.expected_sha256);
+    assert!(receipt.exact_original_bytes);
+    assert_eq!(fs::read(&source).unwrap()[..4], *b"LML1");
+
+    let amplified_destination = temp.path().join("amplified.txt");
+    let mut amplified = request.clone();
+    amplified.destination = amplified_destination.clone();
+    amplified.original_size = 500;
+    amplified.max_output_bytes = 500;
+    amplified.synthetic = SyntheticTemplate::AsciiIntLines(AsciiIntLinesTemplate {
+        line_ending: SyntheticLineEnding::CrLf,
+        leading_whitespace: u8::MAX,
+        field_width: u8::MAX,
+        trailing_newline: false,
+    });
+    assert_eq!(
+        materialize_synthetic_exact(&amplified),
+        Err(LegacyError::OutputTooLarge)
+    );
+    assert!(!amplified_destination.exists());
+
+    #[cfg(unix)]
+    {
+        let fifo = temp.path().join("source.fifo");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        let mut unsafe_request = request.clone();
+        unsafe_request.source = fifo;
+        unsafe_request.destination = temp.path().join("fifo-output.txt");
+        assert_eq!(
+            materialize_synthetic_exact(&unsafe_request),
+            Err(LegacyError::UnsafeSource)
+        );
+        assert!(!unsafe_request.destination.exists());
+    }
 }
 
 #[test]
