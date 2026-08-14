@@ -235,6 +235,10 @@ This operation is advertised only by `legacy.lml1.v1`. It validates source and
 decoded-signal bounds, reconstructs preserved EDF/BDF header and auxiliary
 channels, checks exact output size and SHA-256, and publishes with no-clobber
 semantics. Existing identical output is idempotent; any different output fails.
+`expected_sha256` may be omitted only when a supervising parent verifies the
+candidate bytes against an independently authenticated logical content ID
+before publishing them. In that mode the receipt reports
+`exact_original_bytes: false`; adapter output alone is not completion evidence.
 `max_decoded_bytes` bounds decoded signal buffers, not total process RSS;
 supervising conversion code must enforce a separate process-memory ceiling.
 Publication produces only complete file bytes and is restartable, but does not
@@ -271,7 +275,8 @@ Adapter reconstructs bounded one-channel intermediate EDF, renders declared
 template, then checks original byte count and SHA-256 before no-clobber
 publication. Only `Lf` and `CrLf` line endings are accepted. Template widths
 are bounded `u8` values; `max_intermediate_bytes` and `max_output_bytes` remain
-independent limits.
+independent limits. Same parent-verification exception for omitted
+`expected_sha256` applies to this operation.
 
 An export request names every payload rather than trusting directory layout:
 

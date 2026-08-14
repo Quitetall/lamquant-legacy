@@ -318,7 +318,7 @@ fn lml1_exact_materialization_is_bounded_no_clobber_and_idempotent() {
         source: source.clone(),
         destination: destination.clone(),
         accept_fidelity: true,
-        expected_sha256: expected_sha256.clone(),
+        expected_sha256: Some(expected_sha256.clone()),
         original_size: original.len() as u64,
         max_source_bytes: lml.len() as u64,
         max_decoded_bytes: 1024 * 1024,
@@ -341,6 +341,34 @@ fn lml1_exact_materialization_is_bounded_no_clobber_and_idempotent() {
         Err(LegacyError::DestinationConflict)
     );
     assert_eq!(fs::read(&source).unwrap(), lml);
+}
+
+#[test]
+fn supervised_parent_may_defer_identity_confirmation() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("input.lml");
+    let destination = temp.path().join("candidate.edf");
+    let (lml, original) = lml1_edf_fixture(temp.path());
+    fs::write(&source, &lml).unwrap();
+
+    let receipt = materialize_exact(&MaterializeRequest {
+        source,
+        destination: destination.clone(),
+        accept_fidelity: true,
+        expected_sha256: None,
+        original_size: original.len() as u64,
+        max_source_bytes: lml.len() as u64,
+        max_decoded_bytes: 1024 * 1024,
+        max_output_bytes: original.len() as u64,
+    })
+    .unwrap();
+
+    assert_eq!(fs::read(destination).unwrap(), original);
+    assert!(!receipt.exact_original_bytes);
+    assert_eq!(
+        receipt.output_sha256,
+        format!("{:x}", Sha256::digest(&original))
+    );
 }
 
 #[test]
@@ -381,7 +409,7 @@ fn lml1_synthetic_materialization_re_emits_exact_ascii_source() {
         source: source.clone(),
         destination: destination.clone(),
         accept_fidelity: true,
-        expected_sha256: format!("{:x}", Sha256::digest(original)),
+        expected_sha256: Some(format!("{:x}", Sha256::digest(original))),
         original_size: original.len() as u64,
         max_source_bytes: fs::metadata(&source).unwrap().len(),
         max_decoded_bytes: 1024 * 1024,
@@ -397,7 +425,7 @@ fn lml1_synthetic_materialization_re_emits_exact_ascii_source() {
 
     let receipt = materialize_synthetic_exact(&request).unwrap();
     assert_eq!(fs::read(&destination).unwrap(), original);
-    assert_eq!(receipt.output_sha256, request.expected_sha256);
+    assert_eq!(Some(receipt.output_sha256.clone()), request.expected_sha256);
     assert!(receipt.exact_original_bytes);
     assert_eq!(fs::read(&source).unwrap()[..4], *b"LML1");
 
@@ -460,7 +488,7 @@ fn lml1_exact_materialization_fails_closed_before_publish() {
                 source: source.clone(),
                 destination: temp.path().join("acceptance.edf"),
                 accept_fidelity: false,
-                expected_sha256: format!("{:x}", Sha256::digest(&original)),
+                expected_sha256: Some(format!("{:x}", Sha256::digest(&original))),
                 original_size: original.len() as u64,
                 max_source_bytes: lml.len() as u64,
                 max_decoded_bytes: 1024 * 1024,
@@ -474,7 +502,7 @@ fn lml1_exact_materialization_fails_closed_before_publish() {
                 source: source.clone(),
                 destination: temp.path().join("source-bound.edf"),
                 accept_fidelity: true,
-                expected_sha256: format!("{:x}", Sha256::digest(&original)),
+                expected_sha256: Some(format!("{:x}", Sha256::digest(&original))),
                 original_size: original.len() as u64,
                 max_source_bytes: (lml.len() - 1) as u64,
                 max_decoded_bytes: 1024 * 1024,
@@ -488,7 +516,7 @@ fn lml1_exact_materialization_fails_closed_before_publish() {
                 source: source.clone(),
                 destination: temp.path().join("output-bound.edf"),
                 accept_fidelity: true,
-                expected_sha256: format!("{:x}", Sha256::digest(&original)),
+                expected_sha256: Some(format!("{:x}", Sha256::digest(&original))),
                 original_size: original.len() as u64,
                 max_source_bytes: lml.len() as u64,
                 max_decoded_bytes: 1024 * 1024,
@@ -502,7 +530,7 @@ fn lml1_exact_materialization_fails_closed_before_publish() {
                 source: source.clone(),
                 destination: temp.path().join("decoded-bound.edf"),
                 accept_fidelity: true,
-                expected_sha256: format!("{:x}", Sha256::digest(&original)),
+                expected_sha256: Some(format!("{:x}", Sha256::digest(&original))),
                 original_size: original.len() as u64,
                 max_source_bytes: lml.len() as u64,
                 max_decoded_bytes: 159,
@@ -516,7 +544,7 @@ fn lml1_exact_materialization_fails_closed_before_publish() {
                 source: source.clone(),
                 destination: temp.path().join("digest.edf"),
                 accept_fidelity: true,
-                expected_sha256: "00".repeat(32),
+                expected_sha256: Some("00".repeat(32)),
                 original_size: original.len() as u64,
                 max_source_bytes: lml.len() as u64,
                 max_decoded_bytes: 1024 * 1024,
@@ -579,7 +607,7 @@ fn exact_materialization_capability_and_process_wire_are_explicit() {
         source,
         destination: destination.clone(),
         accept_fidelity: true,
-        expected_sha256: format!("{:x}", Sha256::digest(&original)),
+        expected_sha256: Some(format!("{:x}", Sha256::digest(&original))),
         original_size: original.len() as u64,
         max_source_bytes: lml.len() as u64,
         max_decoded_bytes: 1024 * 1024,
@@ -624,7 +652,7 @@ fn lml1_materialization_rejects_inner_packet_shape_drift_before_output() {
         source,
         destination: destination.clone(),
         accept_fidelity: true,
-        expected_sha256: format!("{:x}", Sha256::digest(&original)),
+        expected_sha256: Some(format!("{:x}", Sha256::digest(&original))),
         original_size: original.len() as u64,
         max_source_bytes: lml.len() as u64,
         max_decoded_bytes: 1024 * 1024,
@@ -647,7 +675,7 @@ fn lml1_materialization_restores_mixed_records_and_trailing_bytes() {
         source: source.clone(),
         destination: destination.clone(),
         accept_fidelity: true,
-        expected_sha256: format!("{:x}", Sha256::digest(&original)),
+        expected_sha256: Some(format!("{:x}", Sha256::digest(&original))),
         original_size: original.len() as u64,
         max_source_bytes: lml.len() as u64,
         max_decoded_bytes: 1024 * 1024,
@@ -673,7 +701,7 @@ fn lml1_materialization_restores_signed_bdf_samples() {
         source,
         destination: destination.clone(),
         accept_fidelity: true,
-        expected_sha256: format!("{:x}", Sha256::digest(&original)),
+        expected_sha256: Some(format!("{:x}", Sha256::digest(&original))),
         original_size: original.len() as u64,
         max_source_bytes: lml.len() as u64,
         max_decoded_bytes: 1024 * 1024,

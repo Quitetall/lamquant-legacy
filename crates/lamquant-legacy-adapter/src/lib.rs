@@ -145,7 +145,9 @@ pub struct MaterializeRequest {
     pub source: PathBuf,
     pub destination: PathBuf,
     pub accept_fidelity: bool,
-    pub expected_sha256: String,
+    /// Optional archive SHA-256. When absent, supervising caller must verify
+    /// returned bytes against its own logical content identity before publish.
+    pub expected_sha256: Option<String>,
     pub original_size: u64,
     pub max_source_bytes: u64,
     /// Logical decoded signal-buffer budget, not a process RSS limit.
@@ -165,7 +167,9 @@ pub struct SyntheticMaterializeRequest {
     pub source: PathBuf,
     pub destination: PathBuf,
     pub accept_fidelity: bool,
-    pub expected_sha256: String,
+    /// Optional archive SHA-256. When absent, supervising caller must verify
+    /// returned bytes against its own logical content identity before publish.
+    pub expected_sha256: Option<String>,
     pub original_size: u64,
     pub max_source_bytes: u64,
     pub max_decoded_bytes: u64,
@@ -762,7 +766,9 @@ pub fn materialize_exact(request: &MaterializeRequest) -> Result<MaterializeRece
     if request.original_size > request.max_output_bytes {
         return Err(LegacyError::OutputTooLarge);
     }
-    validate_expected_sha256(&request.expected_sha256)?;
+    if let Some(expected) = request.expected_sha256.as_deref() {
+        validate_expected_sha256(expected)?;
+    }
 
     let source = read_bounded(&request.source, request.max_source_bytes)?;
     if detect_format(&source)? != LegacyFormat::Lml1 {
@@ -775,7 +781,11 @@ pub fn materialize_exact(request: &MaterializeRequest) -> Result<MaterializeRece
         request.max_output_bytes,
     )?;
     let output_sha256 = format!("{:x}", sha2::Sha256::digest(&output));
-    if output_sha256 != request.expected_sha256 {
+    if request
+        .expected_sha256
+        .as_deref()
+        .is_some_and(|expected| output_sha256 != expected)
+    {
         return Err(LegacyError::OutputIdentityMismatch);
     }
     let receipt = MaterializeReceipt {
@@ -785,7 +795,7 @@ pub fn materialize_exact(request: &MaterializeRequest) -> Result<MaterializeRece
         output_sha256,
         output_bytes: output.len() as u64,
         source_preserved: true,
-        exact_original_bytes: true,
+        exact_original_bytes: request.expected_sha256.is_some(),
     };
 
     publish_materialized(
@@ -808,7 +818,9 @@ pub fn materialize_synthetic_exact(
     if request.original_size > request.max_output_bytes {
         return Err(LegacyError::OutputTooLarge);
     }
-    validate_expected_sha256(&request.expected_sha256)?;
+    if let Some(expected) = request.expected_sha256.as_deref() {
+        validate_expected_sha256(expected)?;
+    }
     let source = read_bounded(&request.source, request.max_source_bytes)?;
     if detect_format(&source)? != LegacyFormat::Lml1 {
         return Err(LegacyError::MaterializationUnsupported);
@@ -831,7 +843,11 @@ pub fn materialize_synthetic_exact(
         return Err(LegacyError::OutputIdentityMismatch);
     }
     let output_sha256 = format!("{:x}", sha2::Sha256::digest(&output));
-    if output_sha256 != request.expected_sha256 {
+    if request
+        .expected_sha256
+        .as_deref()
+        .is_some_and(|expected| output_sha256 != expected)
+    {
         return Err(LegacyError::OutputIdentityMismatch);
     }
     let receipt = MaterializeReceipt {
@@ -841,7 +857,7 @@ pub fn materialize_synthetic_exact(
         output_sha256,
         output_bytes: output.len() as u64,
         source_preserved: true,
-        exact_original_bytes: true,
+        exact_original_bytes: request.expected_sha256.is_some(),
     };
     publish_materialized(
         &request.destination,
