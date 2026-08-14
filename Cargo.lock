@@ -12,20 +12,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "abir"
-version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=e2115200e0e4f284c38aa2afd4578a204cc8f40d#e2115200e0e4f284c38aa2afd4578a204cc8f40d"
-dependencies = [
- "blake3",
- "serde_json",
-]
-
-[[package]]
 name = "abir-adapter"
 version = "0.1.0"
 source = "git+https://github.com/Quitetall/ABIR.git?rev=7e5700e9ef4e5c7c6a42d829196cd2d0a642f647#7e5700e9ef4e5c7c6a42d829196cd2d0a642f647"
 dependencies = [
- "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=7e5700e9ef4e5c7c6a42d829196cd2d0a642f647)",
+ "abir",
  "blake3",
  "serde",
  "serde_json",
@@ -36,21 +27,7 @@ name = "abir-bcs"
 version = "0.1.0"
 source = "git+https://github.com/Quitetall/ABIR.git?rev=7e5700e9ef4e5c7c6a42d829196cd2d0a642f647#7e5700e9ef4e5c7c6a42d829196cd2d0a642f647"
 dependencies = [
- "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=7e5700e9ef4e5c7c6a42d829196cd2d0a642f647)",
- "blake3",
- "chacha20poly1305",
- "minicbor",
- "serde",
- "serde_json",
- "zeroize",
-]
-
-[[package]]
-name = "abir-bcs"
-version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=e2115200e0e4f284c38aa2afd4578a204cc8f40d#e2115200e0e4f284c38aa2afd4578a204cc8f40d"
-dependencies = [
- "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=e2115200e0e4f284c38aa2afd4578a204cc8f40d)",
+ "abir",
  "blake3",
  "chacha20poly1305",
  "minicbor",
@@ -64,20 +41,8 @@ name = "abir-training"
 version = "0.1.0"
 source = "git+https://github.com/Quitetall/ABIR.git?rev=7e5700e9ef4e5c7c6a42d829196cd2d0a642f647#7e5700e9ef4e5c7c6a42d829196cd2d0a642f647"
 dependencies = [
- "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=7e5700e9ef4e5c7c6a42d829196cd2d0a642f647)",
- "abir-bcs 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=7e5700e9ef4e5c7c6a42d829196cd2d0a642f647)",
- "blake3",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "abir-training"
-version = "0.1.0"
-source = "git+https://github.com/Quitetall/ABIR.git?rev=e2115200e0e4f284c38aa2afd4578a204cc8f40d#e2115200e0e4f284c38aa2afd4578a204cc8f40d"
-dependencies = [
- "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=e2115200e0e4f284c38aa2afd4578a204cc8f40d)",
- "abir-bcs 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=e2115200e0e4f284c38aa2afd4578a204cc8f40d)",
+ "abir",
+ "abir-bcs",
  "blake3",
  "serde",
  "serde_json",
@@ -1010,7 +975,7 @@ dependencies = [
 name = "lamquant-abir-bridge"
 version = "0.1.0"
 dependencies = [
- "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=7e5700e9ef4e5c7c6a42d829196cd2d0a642f647)",
+ "abir",
  "blake3",
  "bytemuck",
  "lamquant-legacy-ir",
@@ -1019,59 +984,29 @@ dependencies = [
 [[package]]
 name = "lamquant-abir-codec"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=3d53224c4b524fb058704067db992a7c63c3f323#3d53224c4b524fb058704067db992a7c63c3f323"
+source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=34c43ef27a7219b7ce114d19ce209dae14804100#34c43ef27a7219b7ce114d19ce209dae14804100"
 dependencies = [
- "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=e2115200e0e4f284c38aa2afd4578a204cc8f40d)",
- "abir-bcs 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=e2115200e0e4f284c38aa2afd4578a204cc8f40d)",
+ "abir",
+ "abir-bcs",
  "blake3",
- "lamquant-abir-montage 0.1.0 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=3d53224c4b524fb058704067db992a7c63c3f323)",
- "lamquant-lml-desktop 0.9.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=3d53224c4b524fb058704067db992a7c63c3f323)",
- "lamquant-lml-mcu 0.9.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=3d53224c4b524fb058704067db992a7c63c3f323)",
-]
-
-[[package]]
-name = "lamquant-abir-codec"
-version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72#fe207eba06f566c6a55f33815176f7e69b275e72"
-dependencies = [
- "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=7e5700e9ef4e5c7c6a42d829196cd2d0a642f647)",
- "abir-bcs 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=7e5700e9ef4e5c7c6a42d829196cd2d0a642f647)",
- "blake3",
- "lamquant-abir-montage 0.1.0 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72)",
- "lamquant-lml-desktop 0.9.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72)",
- "lamquant-lml-mcu 0.9.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72)",
+ "lamquant-abir-montage",
+ "lamquant-lml-desktop",
+ "lamquant-lml-mcu",
 ]
 
 [[package]]
 name = "lamquant-abir-montage"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=3d53224c4b524fb058704067db992a7c63c3f323#3d53224c4b524fb058704067db992a7c63c3f323"
+source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=34c43ef27a7219b7ce114d19ce209dae14804100#34c43ef27a7219b7ce114d19ce209dae14804100"
 dependencies = [
- "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=e2115200e0e4f284c38aa2afd4578a204cc8f40d)",
- "sha2",
-]
-
-[[package]]
-name = "lamquant-abir-montage"
-version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72#fe207eba06f566c6a55f33815176f7e69b275e72"
-dependencies = [
- "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=7e5700e9ef4e5c7c6a42d829196cd2d0a642f647)",
+ "abir",
  "sha2",
 ]
 
 [[package]]
 name = "lamquant-common"
 version = "0.1.3"
-source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=3d53224c4b524fb058704067db992a7c63c3f323#3d53224c4b524fb058704067db992a7c63c3f323"
-dependencies = [
- "serde_json",
-]
-
-[[package]]
-name = "lamquant-common"
-version = "0.1.3"
-source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72#fe207eba06f566c6a55f33815176f7e69b275e72"
+source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=34c43ef27a7219b7ce114d19ce209dae14804100#34c43ef27a7219b7ce114d19ce209dae14804100"
 dependencies = [
  "serde_json",
 ]
@@ -1080,15 +1015,15 @@ dependencies = [
 name = "lamquant-legacy-adapter"
 version = "0.1.0"
 dependencies = [
- "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=7e5700e9ef4e5c7c6a42d829196cd2d0a642f647)",
+ "abir",
  "abir-adapter",
  "aes-gcm",
  "base64",
  "blake3",
  "lamquant-legacy-ir",
- "lamquant-lml 0.9.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72)",
+ "lamquant-lml",
  "lamquant-lml-legacy",
- "lamquant-lml-mcu 0.9.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72)",
+ "lamquant-lml-mcu",
  "libc",
  "serde",
  "serde_json",
@@ -1114,49 +1049,21 @@ dependencies = [
 [[package]]
 name = "lamquant-lml"
 version = "0.9.3"
-source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=3d53224c4b524fb058704067db992a7c63c3f323#3d53224c4b524fb058704067db992a7c63c3f323"
+source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=34c43ef27a7219b7ce114d19ce209dae14804100#34c43ef27a7219b7ce114d19ce209dae14804100"
 dependencies = [
- "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=e2115200e0e4f284c38aa2afd4578a204cc8f40d)",
- "abir-bcs 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=e2115200e0e4f284c38aa2afd4578a204cc8f40d)",
- "abir-training 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=e2115200e0e4f284c38aa2afd4578a204cc8f40d)",
- "base64",
- "filetime",
- "globset",
- "lamquant-abir-codec 0.1.0 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=3d53224c4b524fb058704067db992a7c63c3f323)",
- "lamquant-common 0.1.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=3d53224c4b524fb058704067db992a7c63c3f323)",
- "lamquant-lml-desktop 0.9.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=3d53224c4b524fb058704067db992a7c63c3f323)",
- "lamquant-lml-mcu 0.9.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=3d53224c4b524fb058704067db992a7c63c3f323)",
- "lamquant-lml-optimum 0.0.1 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=3d53224c4b524fb058704067db992a7c63c3f323)",
- "lamquant-lml-optimum-v2 0.1.0 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=3d53224c4b524fb058704067db992a7c63c3f323)",
- "memmap2",
- "rayon",
- "realfft",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "walkdir",
- "zstd",
-]
-
-[[package]]
-name = "lamquant-lml"
-version = "0.9.3"
-source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72#fe207eba06f566c6a55f33815176f7e69b275e72"
-dependencies = [
- "abir 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=7e5700e9ef4e5c7c6a42d829196cd2d0a642f647)",
- "abir-bcs 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=7e5700e9ef4e5c7c6a42d829196cd2d0a642f647)",
- "abir-training 0.1.0 (git+https://github.com/Quitetall/ABIR.git?rev=7e5700e9ef4e5c7c6a42d829196cd2d0a642f647)",
+ "abir",
+ "abir-bcs",
+ "abir-training",
  "base64",
  "blake3",
  "filetime",
  "globset",
- "lamquant-abir-codec 0.1.0 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72)",
- "lamquant-common 0.1.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72)",
- "lamquant-lml-desktop 0.9.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72)",
- "lamquant-lml-mcu 0.9.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72)",
- "lamquant-lml-optimum 0.0.1 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72)",
- "lamquant-lml-optimum-v2 0.1.0 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72)",
+ "lamquant-abir-codec",
+ "lamquant-common",
+ "lamquant-lml-desktop",
+ "lamquant-lml-mcu",
+ "lamquant-lml-optimum",
+ "lamquant-lml-optimum-v2",
  "libc",
  "memmap2",
  "rayon",
@@ -1172,17 +1079,9 @@ dependencies = [
 [[package]]
 name = "lamquant-lml-desktop"
 version = "0.9.3"
-source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=3d53224c4b524fb058704067db992a7c63c3f323#3d53224c4b524fb058704067db992a7c63c3f323"
+source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=34c43ef27a7219b7ce114d19ce209dae14804100#34c43ef27a7219b7ce114d19ce209dae14804100"
 dependencies = [
- "lamquant-lml-mcu 0.9.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=3d53224c4b524fb058704067db992a7c63c3f323)",
-]
-
-[[package]]
-name = "lamquant-lml-desktop"
-version = "0.9.3"
-source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72#fe207eba06f566c6a55f33815176f7e69b275e72"
-dependencies = [
- "lamquant-lml-mcu 0.9.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72)",
+ "lamquant-lml-mcu",
 ]
 
 [[package]]
@@ -1190,9 +1089,9 @@ name = "lamquant-lml-legacy"
 version = "0.1.1"
 dependencies = [
  "filetime",
- "lamquant-lml 0.9.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72)",
- "lamquant-lml-desktop 0.9.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72)",
- "lamquant-lml-mcu 0.9.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72)",
+ "lamquant-lml",
+ "lamquant-lml-desktop",
+ "lamquant-lml-mcu",
  "libc",
  "memmap2",
  "serde_json",
@@ -1204,19 +1103,9 @@ dependencies = [
 [[package]]
 name = "lamquant-lml-mcu"
 version = "0.9.3"
-source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=3d53224c4b524fb058704067db992a7c63c3f323#3d53224c4b524fb058704067db992a7c63c3f323"
+source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=34c43ef27a7219b7ce114d19ce209dae14804100#34c43ef27a7219b7ce114d19ce209dae14804100"
 dependencies = [
- "lamquant-common 0.1.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=3d53224c4b524fb058704067db992a7c63c3f323)",
- "libm",
- "rayon",
-]
-
-[[package]]
-name = "lamquant-lml-mcu"
-version = "0.9.3"
-source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72#fe207eba06f566c6a55f33815176f7e69b275e72"
-dependencies = [
- "lamquant-common 0.1.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72)",
+ "lamquant-common",
  "libm",
  "rayon",
 ]
@@ -1224,39 +1113,18 @@ dependencies = [
 [[package]]
 name = "lamquant-lml-optimum"
 version = "0.0.1"
-source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=3d53224c4b524fb058704067db992a7c63c3f323#3d53224c4b524fb058704067db992a7c63c3f323"
+source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=34c43ef27a7219b7ce114d19ce209dae14804100#34c43ef27a7219b7ce114d19ce209dae14804100"
 dependencies = [
- "lamquant-lml-mcu 0.9.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=3d53224c4b524fb058704067db992a7c63c3f323)",
- "rayon",
-]
-
-[[package]]
-name = "lamquant-lml-optimum"
-version = "0.0.1"
-source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72#fe207eba06f566c6a55f33815176f7e69b275e72"
-dependencies = [
- "lamquant-lml-mcu 0.9.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72)",
+ "lamquant-lml-mcu",
  "rayon",
 ]
 
 [[package]]
 name = "lamquant-lml-optimum-v2"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=3d53224c4b524fb058704067db992a7c63c3f323#3d53224c4b524fb058704067db992a7c63c3f323"
+source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=34c43ef27a7219b7ce114d19ce209dae14804100#34c43ef27a7219b7ce114d19ce209dae14804100"
 dependencies = [
- "lamquant-model-pack 0.1.0 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=3d53224c4b524fb058704067db992a7c63c3f323)",
- "libc",
- "rayon",
- "serde_json",
- "sha2",
-]
-
-[[package]]
-name = "lamquant-lml-optimum-v2"
-version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72#fe207eba06f566c6a55f33815176f7e69b275e72"
-dependencies = [
- "lamquant-model-pack 0.1.0 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72)",
+ "lamquant-model-pack",
  "libc",
  "rayon",
  "serde_json",
@@ -1266,15 +1134,7 @@ dependencies = [
 [[package]]
 name = "lamquant-model-pack"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=3d53224c4b524fb058704067db992a7c63c3f323#3d53224c4b524fb058704067db992a7c63c3f323"
-dependencies = [
- "sha2",
-]
-
-[[package]]
-name = "lamquant-model-pack"
-version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72#fe207eba06f566c6a55f33815176f7e69b275e72"
+source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=34c43ef27a7219b7ce114d19ce209dae14804100#34c43ef27a7219b7ce114d19ce209dae14804100"
 dependencies = [
  "sha2",
 ]
@@ -1282,7 +1142,7 @@ dependencies = [
 [[package]]
 name = "lamquant-neg"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72#fe207eba06f566c6a55f33815176f7e69b275e72"
+source = "git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=34c43ef27a7219b7ce114d19ce209dae14804100#34c43ef27a7219b7ce114d19ce209dae14804100"
 dependencies = [
  "serde",
  "serde_json",
@@ -1307,7 +1167,7 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "getrandom 0.2.17",
- "lamquant-lml 0.9.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=fe207eba06f566c6a55f33815176f7e69b275e72)",
+ "lamquant-lml",
  "lamquant-neg",
  "lamquant-visualization-lsl",
  "libc",
@@ -1325,18 +1185,18 @@ dependencies = [
 [[package]]
 name = "lamquant-visualization"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant-Vision.git?rev=93e77c26126d1b7ef01824063fae2f8881cf772d#93e77c26126d1b7ef01824063fae2f8881cf772d"
+source = "git+https://github.com/Quitetall/LamQuant-Vision.git?rev=972b8acc315bc383308160579647cff7a20b3c60#972b8acc315bc383308160579647cff7a20b3c60"
 dependencies = [
- "lamquant-lml 0.9.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=3d53224c4b524fb058704067db992a7c63c3f323)",
+ "lamquant-lml",
  "sha2",
 ]
 
 [[package]]
 name = "lamquant-visualization-lsl"
 version = "0.1.0"
-source = "git+https://github.com/Quitetall/LamQuant-Vision.git?rev=93e77c26126d1b7ef01824063fae2f8881cf772d#93e77c26126d1b7ef01824063fae2f8881cf772d"
+source = "git+https://github.com/Quitetall/LamQuant-Vision.git?rev=972b8acc315bc383308160579647cff7a20b3c60#972b8acc315bc383308160579647cff7a20b3c60"
 dependencies = [
- "lamquant-lml 0.9.3 (git+https://github.com/Quitetall/LamQuant-Lossless.git?rev=3d53224c4b524fb058704067db992a7c63c3f323)",
+ "lamquant-lml",
  "lamquant-visualization",
  "lsl",
  "sha2",
