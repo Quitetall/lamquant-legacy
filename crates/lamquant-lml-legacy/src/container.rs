@@ -664,6 +664,122 @@ pub fn parse_header(data: &[u8]) -> LmlResult<ContainerHeader> {
     })
 }
 
+/// Validate every inner packet shape and return decoded signal-buffer bytes.
+///
+/// The count includes the full container output plus the largest decoded
+/// window. It excludes decoder scratch, encoded input, metadata, allocator
+/// overhead, and caller output. This is a signal-shape admission bound, not an
+/// operating-system RSS limit; supervisors must enforce process memory
+/// separately. Packet dimensions must match their enclosing container, so a
+/// small outer header cannot hide a much larger inner decoded signal.
+pub fn decoded_signal_buffer_bytes(data: &[u8]) -> LmlResult<u64> {
+    let header = parse_header(data)?;
+    let output_bytes = (header.n_ch as u64)
+        .checked_mul(header.total_samples as u64)
+        .and_then(|value| value.checked_mul(8))
+        .ok_or_else(|| LmlError::InvalidHeader("decoded output size overflows u64".into()))?;
+    let mut largest_window_bytes = 0_u64;
+    let mut position = header.payload_start;
+    for window_index in 0..header.n_windows {
+        let length_end = position
+            .checked_add(4)
+            .ok_or_else(|| LmlError::InvalidHeader("window length offset overflows".into()))?;
+        if length_end > data.len() {
+            return Err(LmlError::Truncated {
+                expected: length_end,
+                actual: data.len(),
+                context: "window length",
+            });
+        }
+        let payload_len = u32::from_le_bytes(
+            data[position..length_end]
+                .try_into()
+                .expect("four-byte window length"),
+        ) as usize;
+        let payload_end = length_end
+            .checked_add(payload_len)
+            .ok_or_else(|| LmlError::InvalidHeader("window payload offset overflows".into()))?;
+        if payload_end > data.len() {
+            return Err(LmlError::Truncated {
+                expected: payload_end,
+                actual: data.len(),
+                context: "window payload",
+            });
+        }
+        let (packet_channels, packet_samples) = packet_shape(&data[length_end..payload_end])?;
+        let start = window_index
+            .checked_mul(header.window_size)
+            .ok_or_else(|| LmlError::InvalidHeader("window start overflows".into()))?;
+        let expected_samples = header
+            .total_samples
+            .saturating_sub(start)
+            .min(header.window_size);
+        if packet_channels != header.n_ch || packet_samples != expected_samples {
+            return Err(LmlError::InvalidHeader(format!(
+                "window {window_index}: packet shape [{packet_channels}, {packet_samples}] != \
+                 container shape [{}, {expected_samples}]",
+                header.n_ch
+            )));
+        }
+        let window_bytes = (packet_channels as u64)
+            .checked_mul(packet_samples as u64)
+            .and_then(|value| value.checked_mul(8))
+            .ok_or_else(|| LmlError::InvalidHeader("decoded window size overflows u64".into()))?;
+        largest_window_bytes = largest_window_bytes.max(window_bytes);
+        position = payload_end;
+    }
+    output_bytes
+        .checked_add(largest_window_bytes)
+        .ok_or_else(|| LmlError::InvalidHeader("peak decoded size overflows u64".into()))
+}
+
+fn packet_shape(packet: &[u8]) -> LmlResult<(usize, usize)> {
+    if packet.len() < 4 {
+        return Err(LmlError::Truncated {
+            expected: 4,
+            actual: packet.len(),
+            context: "packet magic",
+        });
+    }
+    let offset = if &packet[..4] == b"LML1" {
+        0
+    } else {
+        (0..packet.len().min(128))
+            .find(|index| {
+                packet[*index] == b'\n'
+                    && index.checked_add(5).is_some_and(|end| end <= packet.len())
+                    && &packet[*index + 1..*index + 5] == b"LML1"
+                    && packet[..*index]
+                        .iter()
+                        .all(|byte| (0x20..=0x7e).contains(byte))
+            })
+            .map(|index| index + 1)
+            .ok_or_else(|| {
+                let mut magic = [0_u8; 4];
+                magic.copy_from_slice(&packet[..4]);
+                LmlError::InvalidMagic(magic)
+            })?
+    };
+    let header_end = offset
+        .checked_add(8)
+        .ok_or_else(|| LmlError::InvalidHeader("packet header offset overflows".into()))?;
+    if header_end > packet.len() {
+        return Err(LmlError::Truncated {
+            expected: header_end,
+            actual: packet.len(),
+            context: "packet shape",
+        });
+    }
+    let channels = u16::from_le_bytes([packet[offset + 4], packet[offset + 5]]) as usize;
+    let samples = u16::from_le_bytes([packet[offset + 6], packet[offset + 7]]) as usize;
+    if channels == 0 || channels > 1024 || samples == 0 {
+        return Err(LmlError::InvalidHeader(format!(
+            "invalid packet shape [{channels}, {samples}]"
+        )));
+    }
+    Ok((channels, samples))
+}
+
 /// Read an LML container from a file, decompress all windows.
 ///
 /// Auto-detects header format: 32-byte (current), 20-byte (v1 with

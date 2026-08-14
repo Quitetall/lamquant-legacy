@@ -1018,6 +1018,7 @@ dependencies = [
  "abir",
  "abir-adapter",
  "aes-gcm",
+ "base64",
  "blake3",
  "lamquant-legacy-ir",
  "lamquant-lml",
@@ -1028,6 +1029,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "zstd",
 ]
 
 [[package]]

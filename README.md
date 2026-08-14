@@ -214,6 +214,33 @@ The two limits are enforced before signal decoding. The destination is created
 atomically and never replaces an existing, different result. Repeating an
 identical request verifies every artifact and returns the same receipt.
 
+Archive migration can request exact file-shaped bytes from a retired LML1 frame
+without linking its decoder into the current codec process:
+
+```json
+{
+  "operation": "materialize-exact",
+  "source": "/input/inner-frame.lml",
+  "destination": "/output/original.edf",
+  "accept_fidelity": true,
+  "expected_sha256": "<archive-manifest-sha256>",
+  "original_size": 123456,
+  "max_source_bytes": 123456,
+  "max_decoded_bytes": 987648,
+  "max_output_bytes": 123456
+}
+```
+
+This operation is advertised only by `legacy.lml1.v1`. It validates source and
+decoded-signal bounds, reconstructs preserved EDF/BDF header and auxiliary
+channels, checks exact output size and SHA-256, and publishes with no-clobber
+semantics. Existing identical output is idempotent; any different output fails.
+`max_decoded_bytes` bounds decoded signal buffers, not total process RSS;
+supervising conversion code must enforce a separate process-memory ceiling.
+Publication produces only complete file bytes and is restartable, but does not
+claim directory-entry durability across sudden power loss. Verify the receipt
+before retiring any source archive.
+
 An export request names every payload rather than trusting directory layout:
 
 ```json

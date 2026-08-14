@@ -12,6 +12,7 @@
     "legacy.lqtp.v3"
   ],
   "forensic_import": "PASS",
+  "exact_materialization": "LML1_ONLY",
   "semantic_import": "PARTIAL",
   "semantic_profiles": {
     "legacy.bcs1.v1": {
@@ -27,6 +28,7 @@
       "source_capsule": "EXACT",
       "metadata": "QUARANTINED",
       "modality": "UNKNOWN_AT_SOURCE",
+      "exact_file_materialization": "PASS_SHA256_BOUND",
       "reverse_export": "PASS_PROJECTED_EXACT_SAMPLES"
     },
     "legacy.lma.v1": {

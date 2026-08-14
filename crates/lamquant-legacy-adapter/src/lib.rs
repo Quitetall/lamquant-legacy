@@ -136,6 +136,36 @@ pub struct ConvertReceipt {
     pub fidelity: String,
 }
 
+/// Request exact file-shaped materialization from one retired container.
+///
+/// This operation exists for archive migration: current code may supervise this
+/// process without linking the retired decoder into its own address space.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MaterializeRequest {
+    pub source: PathBuf,
+    pub destination: PathBuf,
+    pub accept_fidelity: bool,
+    pub expected_sha256: String,
+    pub original_size: u64,
+    pub max_source_bytes: u64,
+    /// Logical decoded signal-buffer budget, not a process RSS limit.
+    ///
+    /// The supervising caller must separately enforce process memory.
+    pub max_decoded_bytes: u64,
+    pub max_output_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MaterializeReceipt {
+    pub profile: String,
+    pub source_blake3: String,
+    pub source_bytes: u64,
+    pub output_sha256: String,
+    pub output_bytes: u64,
+    pub source_preserved: bool,
+    pub exact_original_bytes: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SemanticImportRequest {
     pub source: PathBuf,
@@ -227,6 +257,8 @@ pub struct Capability {
     pub profile: String,
     pub inspect: bool,
     pub forensic_import: bool,
+    #[serde(default)]
+    pub exact_materialization: bool,
     pub semantic_import: bool,
     pub reverse_export: bool,
     /// The exact strings a caller may put in the request's `operation` field.
@@ -248,6 +280,7 @@ pub struct Capability {
 fn capability_operations(
     inspect: bool,
     forensic_import: bool,
+    exact_materialization: bool,
     semantic_import: bool,
     reverse_export: bool,
 ) -> Vec<String> {
@@ -257,6 +290,9 @@ fn capability_operations(
     }
     if forensic_import {
         operations.push("convert-forensic".to_owned());
+    }
+    if exact_materialization {
+        operations.push("materialize-exact".to_owned());
     }
     if semantic_import {
         operations.push("import-semantic".to_owned());
@@ -283,6 +319,7 @@ pub enum ProcessRequest {
         max_source_bytes: u64,
     },
     ConvertForensic(ConvertRequest),
+    MaterializeExact(MaterializeRequest),
     ImportSemantic(SemanticImportRequest),
     ExportSemantic(SemanticExportRequest),
 }
@@ -293,6 +330,7 @@ pub enum ProcessResponse {
     OkManifest(CapabilityManifest),
     OkInspection(Inspection),
     OkConversion(ConvertReceipt),
+    OkMaterialization(MaterializeReceipt),
     OkSemanticImport(SemanticImportReceipt),
     OkSemanticExport(SemanticExportReceipt),
     Error { code: String, message: String },
@@ -305,11 +343,14 @@ pub enum LegacyError {
     AcceptanceRequired,
     SemanticImportUnsupported,
     SemanticExportUnsupported,
+    MaterializationUnsupported,
     /// The AEAD key an encrypted retired blob needs is absent or malformed.
     /// A capability gap, not a broken file.
     KeyUnavailable,
     DecodedTooLarge,
+    OutputTooLarge,
     PayloadIdentityMismatch,
+    OutputIdentityMismatch,
     MalformedContainer(String),
     /// Payload CRC-32 disagreed with the stored checksum: the bytes changed.
     ///
@@ -336,9 +377,12 @@ impl LegacyError {
             Self::AcceptanceRequired => "acceptance-required",
             Self::SemanticImportUnsupported => "semantic-import-unsupported",
             Self::SemanticExportUnsupported => "semantic-export-unsupported",
+            Self::MaterializationUnsupported => "materialization-unsupported",
             Self::KeyUnavailable => "key-unavailable",
             Self::DecodedTooLarge => "decoded-output-too-large",
+            Self::OutputTooLarge => "materialized-output-too-large",
             Self::PayloadIdentityMismatch => "payload-identity-mismatch",
+            Self::OutputIdentityMismatch => "output-identity-mismatch",
             Self::MalformedContainer(_) => "malformed-container",
             Self::CrcMismatch(_) => "crc-mismatch",
             Self::Truncated(_) => "truncated",
@@ -365,14 +409,23 @@ impl fmt::Display for LegacyError {
             Self::SemanticExportUnsupported => formatter.write_str(
                 "current ABIR semantics cannot be represented by the requested retired profile",
             ),
+            Self::MaterializationUnsupported => formatter.write_str(
+                "retired profile has no exact file-shaped materializer",
+            ),
             Self::KeyUnavailable => formatter.write_str(
                 "encrypted retired blob needs a 64-hex-character LAMQUANT_KEY in the environment",
             ),
             Self::DecodedTooLarge => {
                 formatter.write_str("decoded signal exceeds declared byte limit")
             }
+            Self::OutputTooLarge => {
+                formatter.write_str("materialized file exceeds declared byte limit")
+            }
             Self::PayloadIdentityMismatch => {
                 formatter.write_str("payload bytes do not match their ABIR ContentId")
+            }
+            Self::OutputIdentityMismatch => {
+                formatter.write_str("materialized bytes do not match declared SHA-256")
             }
             Self::MalformedContainer(message) => write!(formatter, "malformed container: {message}"),
             Self::CrcMismatch(message) => write!(formatter, "payload CRC mismatch: {message}"),
@@ -450,17 +503,20 @@ pub fn capability_manifest() -> CapabilityManifest {
             .map(|format| {
                 let inspect = true;
                 let forensic_import = true;
+                let exact_materialization = format == LegacyFormat::Lml1;
                 let semantic_import = format.supports_semantic_import();
                 let reverse_export = format.supports_reverse_export();
                 Capability {
                     profile: format.profile().to_owned(),
                     inspect,
                     forensic_import,
+                    exact_materialization,
                     semantic_import,
                     reverse_export,
                     operations: capability_operations(
                         inspect,
                         forensic_import,
+                        exact_materialization,
                         semantic_import,
                         reverse_export,
                     ),
@@ -644,6 +700,368 @@ pub fn convert_forensic(request: &ConvertRequest) -> Result<ConvertReceipt, Lega
         std::mem::forget(temporary);
     }
     result
+}
+
+/// Materialize exact original EDF/BDF bytes from one retired LML1 container.
+///
+/// Callers must supply archive-manifest size and SHA-256. Successful return
+/// therefore proves the retired decoder produced the file the archive claimed,
+/// not merely a parseable signal with similar samples.
+pub fn materialize_exact(request: &MaterializeRequest) -> Result<MaterializeReceipt, LegacyError> {
+    use sha2::Digest;
+
+    if !request.accept_fidelity {
+        return Err(LegacyError::AcceptanceRequired);
+    }
+    if request.original_size > request.max_output_bytes {
+        return Err(LegacyError::OutputTooLarge);
+    }
+    if request.expected_sha256.len() != 64
+        || !request
+            .expected_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(LegacyError::InvalidProtocol(
+            "expected_sha256 must be 64 lowercase hexadecimal characters".to_owned(),
+        ));
+    }
+
+    let source = read_bounded(&request.source, request.max_source_bytes)?;
+    if detect_format(&source)? != LegacyFormat::Lml1 {
+        return Err(LegacyError::MaterializationUnsupported);
+    }
+    let output = reconstruct_lml1_file(
+        &source,
+        request.original_size,
+        request.max_decoded_bytes,
+        request.max_output_bytes,
+    )?;
+    let output_sha256 = format!("{:x}", sha2::Sha256::digest(&output));
+    if output_sha256 != request.expected_sha256 {
+        return Err(LegacyError::OutputIdentityMismatch);
+    }
+    let receipt = MaterializeReceipt {
+        profile: LegacyFormat::Lml1.profile().to_owned(),
+        source_blake3: blake3::hash(&source).to_hex().to_string(),
+        source_bytes: source.len() as u64,
+        output_sha256,
+        output_bytes: output.len() as u64,
+        source_preserved: true,
+        exact_original_bytes: true,
+    };
+
+    if request.destination.exists() {
+        let existing = read_bounded(&request.destination, request.max_output_bytes)
+            .map_err(|_| LegacyError::DestinationConflict)?;
+        return if existing == output {
+            Ok(receipt)
+        } else {
+            Err(LegacyError::DestinationConflict)
+        };
+    }
+    let parent = request
+        .destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(io_error)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(io_error)?;
+    temporary.write_all(&output).map_err(io_error)?;
+    temporary.as_file_mut().sync_all().map_err(io_error)?;
+    match temporary.persist_noclobber(&request.destination) {
+        Ok(_) => Ok(receipt),
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            drop(error.file);
+            let existing = read_bounded(&request.destination, request.max_output_bytes)
+                .map_err(|_| LegacyError::DestinationConflict)?;
+            if existing == output {
+                Ok(receipt)
+            } else {
+                Err(LegacyError::DestinationConflict)
+            }
+        }
+        Err(error) => Err(io_error(error.error)),
+    }
+}
+
+fn reconstruct_lml1_file(
+    source: &[u8],
+    original_size: u64,
+    max_decoded_bytes: u64,
+    max_output_bytes: u64,
+) -> Result<Vec<u8>, LegacyError> {
+    use base64::Engine;
+    use sha2::Digest;
+
+    let facts = inspect_container(source, LegacyFormat::Lml1, max_decoded_bytes)?;
+    let decoded_signal_bytes = lamquant_lml_legacy::container::decoded_signal_buffer_bytes(source)
+        .map_err(classify_container_error)?;
+    if decoded_signal_bytes > max_decoded_bytes {
+        return Err(LegacyError::DecodedTooLarge);
+    }
+    let (signal, metadata) =
+        lamquant_lml_legacy::container::read_bytes(source).map_err(classify_container_error)?;
+    verify_decoded_shape(&signal, &facts)?;
+    let metadata: Value = serde_json::from_str(&metadata)
+        .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+
+    let header_b64 = metadata
+        .get("edf_header")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            LegacyError::MalformedContainer("LML1 metadata lacks a nonempty edf_header".to_owned())
+        })?;
+    let compressed_header = base64::engine::general_purpose::STANDARD
+        .decode(header_b64)
+        .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+    let header = decode_zstd_bounded(&compressed_header, max_output_bytes, "EDF header")?;
+    if header.len() < 256 {
+        return Err(LegacyError::MalformedContainer(format!(
+            "EDF header is {} bytes; minimum is 256",
+            header.len()
+        )));
+    }
+    if let Some(expected) = metadata.get("edf_header_sha256").and_then(Value::as_str) {
+        let actual = format!("{:x}", sha2::Sha256::digest(&header));
+        if actual != expected {
+            return Err(LegacyError::OutputIdentityMismatch);
+        }
+    }
+
+    let n_signals = std::str::from_utf8(&header[252..256])
+        .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?
+        .trim()
+        .parse::<usize>()
+        .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+    if n_signals == 0 {
+        return Err(LegacyError::MalformedContainer(
+            "EDF header declares zero signals".to_owned(),
+        ));
+    }
+    let is_bdf = header[0] == 0xff;
+    let bytes_per_sample = if is_bdf { 3_usize } else { 2_usize };
+    let n_data_records = required_usize(&metadata, "n_data_records")?;
+    let samples_per_record = required_usize_array(&metadata, "all_ns_per_rec")?;
+    if samples_per_record.len() != n_signals {
+        return Err(LegacyError::MalformedContainer(format!(
+            "all_ns_per_rec has {} entries; EDF header declares {n_signals}",
+            samples_per_record.len()
+        )));
+    }
+    let eeg_indices = required_usize_array(&metadata, "eeg_channel_indices")?;
+    if eeg_indices.len() != signal.len() || eeg_indices.is_empty() {
+        return Err(LegacyError::MalformedContainer(
+            "EEG channel index count does not match decoded signal".to_owned(),
+        ));
+    }
+    let mut eeg_position = std::collections::BTreeMap::new();
+    for (position, channel) in eeg_indices.iter().copied().enumerate() {
+        if channel >= n_signals || eeg_position.insert(channel, position).is_some() {
+            return Err(LegacyError::MalformedContainer(
+                "EEG channel indices are duplicated or out of range".to_owned(),
+            ));
+        }
+    }
+
+    let total_samples_per_record = samples_per_record
+        .iter()
+        .try_fold(0_usize, |total, value| total.checked_add(*value))
+        .ok_or(LegacyError::OutputTooLarge)?;
+    let data_bytes = n_data_records
+        .checked_mul(total_samples_per_record)
+        .and_then(|value| value.checked_mul(bytes_per_sample))
+        .ok_or(LegacyError::OutputTooLarge)?;
+    let fixed_output = header
+        .len()
+        .checked_add(data_bytes)
+        .ok_or(LegacyError::OutputTooLarge)?;
+    if u64::try_from(fixed_output).map_err(|_| LegacyError::OutputTooLarge)? > max_output_bytes {
+        return Err(LegacyError::OutputTooLarge);
+    }
+    let original_len = usize::try_from(original_size).map_err(|_| LegacyError::OutputTooLarge)?;
+    if fixed_output > original_len {
+        return Err(LegacyError::OutputIdentityMismatch);
+    }
+
+    let mut non_eeg = std::collections::BTreeMap::new();
+    if let Some(channels) = metadata.get("non_eeg_channels").and_then(Value::as_object) {
+        for (channel, encoded) in channels {
+            let channel = channel
+                .parse::<usize>()
+                .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+            if channel >= n_signals || eeg_position.contains_key(&channel) {
+                return Err(LegacyError::MalformedContainer(
+                    "non-EEG channel index is duplicated or out of range".to_owned(),
+                ));
+            }
+            let encoded = encoded.as_str().ok_or_else(|| {
+                LegacyError::MalformedContainer("non-EEG payload is not base64 text".to_owned())
+            })?;
+            let compressed = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+            let expected = n_data_records
+                .checked_mul(samples_per_record[channel])
+                .and_then(|value| value.checked_mul(bytes_per_sample))
+                .ok_or(LegacyError::OutputTooLarge)?;
+            let decoded = decode_zstd_bounded(
+                &compressed,
+                u64::try_from(expected).map_err(|_| LegacyError::OutputTooLarge)?,
+                "non-EEG channel",
+            )?;
+            if decoded.len() != expected {
+                return Err(LegacyError::MalformedContainer(
+                    "non-EEG payload length does not match channel layout".to_owned(),
+                ));
+            }
+            non_eeg.insert(channel, decoded);
+        }
+    }
+
+    let mode_samples = samples_per_record[eeg_indices[0]];
+    let expected_signal_samples = n_data_records
+        .checked_mul(mode_samples)
+        .ok_or(LegacyError::DecodedTooLarge)?;
+    for (position, channel) in eeg_indices.iter().copied().enumerate() {
+        if samples_per_record[channel] != mode_samples
+            || signal[position].len() != expected_signal_samples
+        {
+            return Err(LegacyError::MalformedContainer(
+                "decoded EEG shape does not match EDF record layout".to_owned(),
+            ));
+        }
+    }
+
+    if original_len > isize::MAX as usize {
+        return Err(LegacyError::OutputTooLarge);
+    }
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(original_len)
+        .map_err(|_| LegacyError::OutputTooLarge)?;
+    output.resize(original_len, 0_u8);
+    output[..header.len()].copy_from_slice(&header);
+    for record in 0..n_data_records {
+        let mut sample_offset = 0_usize;
+        for (channel, channel_samples) in samples_per_record.iter().copied().enumerate() {
+            let byte_offset = record
+                .checked_mul(total_samples_per_record)
+                .and_then(|value| value.checked_add(sample_offset))
+                .and_then(|value| value.checked_mul(bytes_per_sample))
+                .ok_or(LegacyError::OutputTooLarge)?;
+            if let Some(position) = eeg_position.get(&channel).copied() {
+                let signal_offset = record
+                    .checked_mul(mode_samples)
+                    .ok_or(LegacyError::DecodedTooLarge)?;
+                for sample in 0..channel_samples {
+                    let value = signal[position][signal_offset + sample];
+                    let target = header.len() + byte_offset + sample * bytes_per_sample;
+                    if is_bdf {
+                        if !(-8_388_608..=8_388_607).contains(&value) {
+                            return Err(LegacyError::MalformedContainer(
+                                "decoded BDF sample exceeds signed 24-bit range".to_owned(),
+                            ));
+                        }
+                        let value = if value < 0 {
+                            value + (1_i64 << 24)
+                        } else {
+                            value
+                        } as u32;
+                        output[target] = (value & 0xff) as u8;
+                        output[target + 1] = ((value >> 8) & 0xff) as u8;
+                        output[target + 2] = ((value >> 16) & 0xff) as u8;
+                    } else {
+                        if !(-32_768..=32_767).contains(&value) {
+                            return Err(LegacyError::MalformedContainer(
+                                "decoded EDF sample exceeds signed 16-bit range".to_owned(),
+                            ));
+                        }
+                        output[target..target + 2].copy_from_slice(&(value as i16).to_le_bytes());
+                    }
+                }
+            } else {
+                let source = non_eeg.get(&channel).ok_or_else(|| {
+                    LegacyError::MalformedContainer(format!(
+                        "EDF channel {channel} has no decoded or preserved payload"
+                    ))
+                })?;
+                let chunk = channel_samples * bytes_per_sample;
+                let source_offset = record * chunk;
+                let target = header.len() + byte_offset;
+                output[target..target + chunk]
+                    .copy_from_slice(&source[source_offset..source_offset + chunk]);
+            }
+            sample_offset += channel_samples;
+        }
+    }
+
+    let trailing = match metadata.get("trailing_data").and_then(Value::as_str) {
+        None | Some("") => Vec::new(),
+        Some(encoded) => {
+            let compressed = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|error| LegacyError::MalformedContainer(error.to_string()))?;
+            decode_zstd_bounded(
+                &compressed,
+                max_output_bytes.saturating_sub(fixed_output as u64),
+                "trailing EDF data",
+            )?
+        }
+    };
+    let materialized_len = fixed_output
+        .checked_add(trailing.len())
+        .ok_or(LegacyError::OutputTooLarge)?;
+    if materialized_len > original_len {
+        return Err(LegacyError::OutputIdentityMismatch);
+    }
+    output[fixed_output..materialized_len].copy_from_slice(&trailing);
+    Ok(output)
+}
+
+fn required_usize(metadata: &Value, field: &str) -> Result<usize, LegacyError> {
+    metadata
+        .get(field)
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| LegacyError::MalformedContainer(format!("missing or invalid {field}")))
+}
+
+fn required_usize_array(metadata: &Value, field: &str) -> Result<Vec<usize>, LegacyError> {
+    metadata
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| LegacyError::MalformedContainer(format!("missing or invalid {field}")))?
+        .iter()
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| LegacyError::MalformedContainer(format!("invalid {field} entry")))
+        })
+        .collect()
+}
+
+fn decode_zstd_bounded(
+    compressed: &[u8],
+    max_output_bytes: u64,
+    label: &str,
+) -> Result<Vec<u8>, LegacyError> {
+    let decoder = zstd::stream::read::Decoder::new(compressed)
+        .map_err(|error| LegacyError::MalformedContainer(format!("{label}: {error}")))?;
+    let limit = max_output_bytes
+        .checked_add(1)
+        .ok_or(LegacyError::OutputTooLarge)?;
+    let mut output = Vec::new();
+    decoder
+        .take(limit)
+        .read_to_end(&mut output)
+        .map_err(|error| LegacyError::MalformedContainer(format!("{label}: {error}")))?;
+    if output.len() as u64 > max_output_bytes {
+        return Err(LegacyError::OutputTooLarge);
+    }
+    Ok(output)
 }
 
 pub fn import_semantic(
@@ -3228,6 +3646,9 @@ pub fn handle(request: ProcessRequest) -> ProcessResponse {
         } => inspect(&source, max_source_bytes).map(ProcessResponse::OkInspection),
         ProcessRequest::ConvertForensic(request) => {
             convert_forensic(&request).map(ProcessResponse::OkConversion)
+        }
+        ProcessRequest::MaterializeExact(request) => {
+            materialize_exact(&request).map(ProcessResponse::OkMaterialization)
         }
         ProcessRequest::ImportSemantic(request) => {
             import_semantic(&request).map(ProcessResponse::OkSemanticImport)

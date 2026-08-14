@@ -1,11 +1,161 @@
 use lamquant_legacy_adapter::{
-    capability_manifest, convert_forensic, detect_format, export_semantic, import_semantic,
-    inspect, ConvertRequest, ExportPayload, LegacyError, LegacyFormat, SemanticExportRequest,
+    capability_manifest, convert_forensic, detect_format, export_semantic, handle, import_semantic,
+    inspect, materialize_exact, Capability, ConvertRequest, ExportPayload, LegacyError,
+    LegacyFormat, MaterializeRequest, ProcessRequest, ProcessResponse, SemanticExportRequest,
     SemanticImportRequest,
 };
 use lamquant_legacy_ir::{Bcs1Header, BCS1_VERSION_MAJOR, BCS1_VERSION_MINOR, CODEC_LML_53};
 use sha2::{Digest, Sha256};
 use std::fs;
+
+fn lml1_edf_fixture(root: &std::path::Path) -> (Vec<u8>, Vec<u8>) {
+    use base64::Engine;
+
+    let signal = source_signal();
+    let mut header = vec![b' '; 256 + signal.len() * 256];
+    header[..8].copy_from_slice(b"0       ");
+    header[184..192].copy_from_slice(b"768     ");
+    header[236..244].copy_from_slice(b"1       ");
+    header[244..252].copy_from_slice(b"1       ");
+    header[252..256].copy_from_slice(b"2   ");
+    let header_sha = format!("{:x}", Sha256::digest(&header));
+    let compressed_header = zstd::encode_all(header.as_slice(), 1).unwrap();
+    let metadata = serde_json::json!({
+        "edf_header": base64::engine::general_purpose::STANDARD.encode(compressed_header),
+        "edf_header_sha256": header_sha,
+        "n_data_records": 1,
+        "all_ns_per_rec": [5, 5],
+        "eeg_channel_indices": [0, 1],
+        "non_eeg_channels": {},
+        "trailing_data": ""
+    });
+    let source = root.join("fixture.lml");
+    lamquant_lml_legacy::container::write_file(
+        &source,
+        &signal,
+        250.0,
+        5,
+        0,
+        &serde_json::to_string(&metadata).unwrap(),
+    )
+    .unwrap();
+
+    let mut original = header;
+    for channel in &signal {
+        original.extend(
+            channel
+                .iter()
+                .flat_map(|value| (*value as i16).to_le_bytes()),
+        );
+    }
+    (fs::read(source).unwrap(), original)
+}
+
+fn lml1_mixed_edf_fixture(root: &std::path::Path) -> (Vec<u8>, Vec<u8>) {
+    use base64::Engine;
+
+    let signal = vec![
+        vec![-32_768, -1, 0, 1, 2, 32_767],
+        vec![100, 101, 102, 103, 104, 105],
+    ];
+    let mut header = vec![b' '; 256 + 3 * 256];
+    header[..8].copy_from_slice(b"0       ");
+    header[184..192].copy_from_slice(b"1024    ");
+    header[236..244].copy_from_slice(b"2       ");
+    header[244..252].copy_from_slice(b"1       ");
+    header[252..256].copy_from_slice(b"3   ");
+    let non_eeg = [1_u8, 2, 3, 4, 5, 6, 7, 8];
+    let trailing = [0xaa_u8, 0xbb, 0xcc];
+    let metadata = serde_json::json!({
+        "edf_header": base64::engine::general_purpose::STANDARD
+            .encode(zstd::encode_all(header.as_slice(), 1).unwrap()),
+        "edf_header_sha256": format!("{:x}", Sha256::digest(&header)),
+        "n_data_records": 2,
+        "all_ns_per_rec": [3, 3, 2],
+        "eeg_channel_indices": [0, 1],
+        "non_eeg_channels": {
+            "2": base64::engine::general_purpose::STANDARD
+                .encode(zstd::encode_all(non_eeg.as_slice(), 1).unwrap())
+        },
+        "trailing_data": base64::engine::general_purpose::STANDARD
+            .encode(zstd::encode_all(trailing.as_slice(), 1).unwrap())
+    });
+    let source = root.join("mixed-fixture.lml");
+    lamquant_lml_legacy::container::write_file(
+        &source,
+        &signal,
+        250.0,
+        3,
+        0,
+        &serde_json::to_string(&metadata).unwrap(),
+    )
+    .unwrap();
+
+    let mut original = header;
+    for record in 0..2 {
+        for channel in &signal {
+            original.extend(
+                channel[record * 3..record * 3 + 3]
+                    .iter()
+                    .flat_map(|value| (*value as i16).to_le_bytes()),
+            );
+        }
+        original.extend_from_slice(&non_eeg[record * 4..record * 4 + 4]);
+    }
+    original.extend_from_slice(&trailing);
+    (fs::read(source).unwrap(), original)
+}
+
+fn signed_24_le(value: i64) -> [u8; 3] {
+    let encoded = if value < 0 {
+        value + (1_i64 << 24)
+    } else {
+        value
+    } as u32;
+    [
+        (encoded & 0xff) as u8,
+        ((encoded >> 8) & 0xff) as u8,
+        ((encoded >> 16) & 0xff) as u8,
+    ]
+}
+
+fn lml1_bdf_fixture(root: &std::path::Path) -> (Vec<u8>, Vec<u8>) {
+    use base64::Engine;
+
+    let signal = vec![vec![-8_388_608, -1, 0, 8_388_607]];
+    let mut header = vec![b' '; 512];
+    header[0] = 0xff;
+    header[184..192].copy_from_slice(b"512     ");
+    header[236..244].copy_from_slice(b"1       ");
+    header[244..252].copy_from_slice(b"1       ");
+    header[252..256].copy_from_slice(b"1   ");
+    let metadata = serde_json::json!({
+        "edf_header": base64::engine::general_purpose::STANDARD
+            .encode(zstd::encode_all(header.as_slice(), 1).unwrap()),
+        "edf_header_sha256": format!("{:x}", Sha256::digest(&header)),
+        "n_data_records": 1,
+        "all_ns_per_rec": [4],
+        "eeg_channel_indices": [0],
+        "non_eeg_channels": {},
+        "trailing_data": ""
+    });
+    let source = root.join("bdf-fixture.lml");
+    lamquant_lml_legacy::container::write_file(
+        &source,
+        &signal,
+        250.0,
+        4,
+        0,
+        &serde_json::to_string(&metadata).unwrap(),
+    )
+    .unwrap();
+
+    let mut original = header;
+    for value in &signal[0] {
+        original.extend_from_slice(&signed_24_le(*value));
+    }
+    (fs::read(source).unwrap(), original)
+}
 
 fn source_signal() -> Vec<Vec<i64>> {
     vec![vec![-9, -1, 0, 7, 11], vec![100, 101, 99, 102, 98]]
@@ -156,6 +306,128 @@ fn conversion_fails_before_output_without_acceptance() {
 }
 
 #[test]
+fn lml1_exact_materialization_is_bounded_no_clobber_and_idempotent() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("input.lml");
+    let destination = temp.path().join("restored.edf");
+    let (lml, original) = lml1_edf_fixture(temp.path());
+    fs::write(&source, &lml).unwrap();
+    let expected_sha256 = format!("{:x}", Sha256::digest(&original));
+    let request = MaterializeRequest {
+        source: source.clone(),
+        destination: destination.clone(),
+        accept_fidelity: true,
+        expected_sha256: expected_sha256.clone(),
+        original_size: original.len() as u64,
+        max_source_bytes: lml.len() as u64,
+        max_decoded_bytes: 1024 * 1024,
+        max_output_bytes: original.len() as u64,
+    };
+
+    let first = materialize_exact(&request).unwrap();
+    let second = materialize_exact(&request).unwrap();
+    assert_eq!(first, second);
+    assert_eq!(first.profile, "legacy.lml1.v1");
+    assert_eq!(first.output_sha256, expected_sha256);
+    assert_eq!(first.output_bytes, original.len() as u64);
+    assert!(first.exact_original_bytes);
+    assert_eq!(fs::read(&destination).unwrap(), original);
+    assert_eq!(fs::read(&source).unwrap(), lml);
+
+    fs::write(&destination, b"conflict").unwrap();
+    assert_eq!(
+        materialize_exact(&request),
+        Err(LegacyError::DestinationConflict)
+    );
+    assert_eq!(fs::read(&source).unwrap(), lml);
+}
+
+#[test]
+fn lml1_exact_materialization_fails_closed_before_publish() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("input.lml");
+    let (lml, original) = lml1_edf_fixture(temp.path());
+    fs::write(&source, &lml).unwrap();
+
+    for (name, request, expected) in [
+        (
+            "acceptance",
+            MaterializeRequest {
+                source: source.clone(),
+                destination: temp.path().join("acceptance.edf"),
+                accept_fidelity: false,
+                expected_sha256: format!("{:x}", Sha256::digest(&original)),
+                original_size: original.len() as u64,
+                max_source_bytes: lml.len() as u64,
+                max_decoded_bytes: 1024 * 1024,
+                max_output_bytes: original.len() as u64,
+            },
+            LegacyError::AcceptanceRequired,
+        ),
+        (
+            "source-bound",
+            MaterializeRequest {
+                source: source.clone(),
+                destination: temp.path().join("source-bound.edf"),
+                accept_fidelity: true,
+                expected_sha256: format!("{:x}", Sha256::digest(&original)),
+                original_size: original.len() as u64,
+                max_source_bytes: (lml.len() - 1) as u64,
+                max_decoded_bytes: 1024 * 1024,
+                max_output_bytes: original.len() as u64,
+            },
+            LegacyError::SourceTooLarge,
+        ),
+        (
+            "output-bound",
+            MaterializeRequest {
+                source: source.clone(),
+                destination: temp.path().join("output-bound.edf"),
+                accept_fidelity: true,
+                expected_sha256: format!("{:x}", Sha256::digest(&original)),
+                original_size: original.len() as u64,
+                max_source_bytes: lml.len() as u64,
+                max_decoded_bytes: 1024 * 1024,
+                max_output_bytes: (original.len() - 1) as u64,
+            },
+            LegacyError::OutputTooLarge,
+        ),
+        (
+            "decoded-bound",
+            MaterializeRequest {
+                source: source.clone(),
+                destination: temp.path().join("decoded-bound.edf"),
+                accept_fidelity: true,
+                expected_sha256: format!("{:x}", Sha256::digest(&original)),
+                original_size: original.len() as u64,
+                max_source_bytes: lml.len() as u64,
+                max_decoded_bytes: 159,
+                max_output_bytes: original.len() as u64,
+            },
+            LegacyError::DecodedTooLarge,
+        ),
+        (
+            "digest",
+            MaterializeRequest {
+                source: source.clone(),
+                destination: temp.path().join("digest.edf"),
+                accept_fidelity: true,
+                expected_sha256: "00".repeat(32),
+                original_size: original.len() as u64,
+                max_source_bytes: lml.len() as u64,
+                max_decoded_bytes: 1024 * 1024,
+                max_output_bytes: original.len() as u64,
+            },
+            LegacyError::OutputIdentityMismatch,
+        ),
+    ] {
+        let destination = request.destination.clone();
+        assert_eq!(materialize_exact(&request), Err(expected), "{name}");
+        assert!(!destination.exists(), "{name} published output");
+    }
+}
+
+#[test]
 fn unknown_and_oversized_inputs_fail_closed() {
     assert_eq!(detect_format(b"nope"), Err(LegacyError::UnknownMagic));
     let temp = tempfile::tempdir().unwrap();
@@ -177,6 +449,139 @@ fn committed_capability_manifest_matches_runtime() {
         serde_json::from_slice(include_bytes!("../../../capability-manifest.json")).unwrap();
     let runtime = serde_json::to_value(capability_manifest()).unwrap();
     assert_eq!(committed, runtime);
+}
+
+#[test]
+fn exact_materialization_capability_and_process_wire_are_explicit() {
+    let manifest = capability_manifest();
+    for capability in &manifest.capabilities {
+        let expected = capability.profile == "legacy.lml1.v1";
+        assert_eq!(capability.exact_materialization, expected);
+        assert_eq!(
+            capability
+                .operations
+                .iter()
+                .any(|operation| operation == "materialize-exact"),
+            expected
+        );
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("input.lml");
+    let destination = temp.path().join("process.edf");
+    let (lml, original) = lml1_edf_fixture(temp.path());
+    fs::write(&source, &lml).unwrap();
+    let request = ProcessRequest::MaterializeExact(MaterializeRequest {
+        source,
+        destination: destination.clone(),
+        accept_fidelity: true,
+        expected_sha256: format!("{:x}", Sha256::digest(&original)),
+        original_size: original.len() as u64,
+        max_source_bytes: lml.len() as u64,
+        max_decoded_bytes: 1024 * 1024,
+        max_output_bytes: original.len() as u64,
+    });
+    let wire = serde_json::to_value(&request).unwrap();
+    assert_eq!(wire["operation"], "materialize-exact");
+    let response = handle(serde_json::from_value(wire).unwrap());
+    assert!(matches!(response, ProcessResponse::OkMaterialization(_)));
+    assert_eq!(fs::read(destination).unwrap(), original);
+
+    let older_v1: Capability = serde_json::from_value(serde_json::json!({
+        "profile": "legacy.lml1.v1",
+        "detect": true,
+        "inspect": true,
+        "forensic_import": true,
+        "semantic_import": true,
+        "reverse_export": false,
+        "operations": ["detect", "inspect", "forensic-import", "semantic-import"]
+    }))
+    .unwrap();
+    assert!(!older_v1.exact_materialization);
+}
+
+#[test]
+fn lml1_materialization_rejects_inner_packet_shape_drift_before_output() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("shape-drift.lml");
+    let destination = temp.path().join("shape-drift.edf");
+    let (mut lml, original) = lml1_edf_fixture(temp.path());
+    let header = lamquant_lml_legacy::container::parse_header(&lml).unwrap();
+    let packet_start = header.payload_start + 4;
+    let magic_offset = lml[packet_start..packet_start + 128.min(lml.len() - packet_start)]
+        .windows(4)
+        .position(|window| window == b"LML1")
+        .unwrap();
+    let shape_offset = packet_start + magic_offset + 6;
+    lml[shape_offset..shape_offset + 2].copy_from_slice(&1000_u16.to_le_bytes());
+    fs::write(&source, &lml).unwrap();
+
+    let error = materialize_exact(&MaterializeRequest {
+        source,
+        destination: destination.clone(),
+        accept_fidelity: true,
+        expected_sha256: format!("{:x}", Sha256::digest(&original)),
+        original_size: original.len() as u64,
+        max_source_bytes: lml.len() as u64,
+        max_decoded_bytes: 1024 * 1024,
+        max_output_bytes: original.len() as u64,
+    })
+    .unwrap_err();
+    assert!(matches!(error, LegacyError::MalformedContainer(_)));
+    assert!(!destination.exists());
+}
+
+#[test]
+fn lml1_materialization_restores_mixed_records_and_trailing_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("mixed.lml");
+    let destination = temp.path().join("mixed.edf");
+    let (lml, original) = lml1_mixed_edf_fixture(temp.path());
+    fs::write(&source, &lml).unwrap();
+
+    let receipt = materialize_exact(&MaterializeRequest {
+        source: source.clone(),
+        destination: destination.clone(),
+        accept_fidelity: true,
+        expected_sha256: format!("{:x}", Sha256::digest(&original)),
+        original_size: original.len() as u64,
+        max_source_bytes: lml.len() as u64,
+        max_decoded_bytes: 1024 * 1024,
+        max_output_bytes: original.len() as u64,
+    })
+    .unwrap();
+
+    assert_eq!(fs::read(source).unwrap(), lml);
+    assert_eq!(fs::read(destination).unwrap(), original);
+    assert_eq!(receipt.output_bytes, original.len() as u64);
+    assert!(receipt.exact_original_bytes);
+}
+
+#[test]
+fn lml1_materialization_restores_signed_bdf_samples() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("input.lml");
+    let destination = temp.path().join("output.bdf");
+    let (lml, original) = lml1_bdf_fixture(temp.path());
+    fs::write(&source, &lml).unwrap();
+
+    let receipt = materialize_exact(&MaterializeRequest {
+        source,
+        destination: destination.clone(),
+        accept_fidelity: true,
+        expected_sha256: format!("{:x}", Sha256::digest(&original)),
+        original_size: original.len() as u64,
+        max_source_bytes: lml.len() as u64,
+        max_decoded_bytes: 1024 * 1024,
+        max_output_bytes: original.len() as u64,
+    })
+    .unwrap();
+
+    assert_eq!(fs::read(destination).unwrap(), original);
+    assert_eq!(
+        receipt.output_sha256,
+        format!("{:x}", Sha256::digest(&original))
+    );
 }
 
 #[test]
