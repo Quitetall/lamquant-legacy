@@ -311,6 +311,10 @@ pub struct Capability {
     pub forensic_import: bool,
     #[serde(default)]
     pub exact_materialization: bool,
+    /// Whether exact-materialization requests may omit `expected_sha256` and
+    /// return a non-final candidate for parent ContentId verification.
+    #[serde(default)]
+    pub parent_verified_materialization: bool,
     pub semantic_import: bool,
     pub reverse_export: bool,
     /// The exact strings a caller may put in the request's `operation` field.
@@ -565,6 +569,7 @@ pub fn capability_manifest() -> CapabilityManifest {
                     inspect,
                     forensic_import,
                     exact_materialization,
+                    parent_verified_materialization: exact_materialization,
                     semantic_import,
                     reverse_export,
                     operations: capability_operations(
@@ -758,9 +763,11 @@ pub fn convert_forensic(request: &ConvertRequest) -> Result<ConvertReceipt, Lega
 
 /// Materialize exact original EDF/BDF bytes from one retired LML1 container.
 ///
-/// Callers must supply archive-manifest size and SHA-256. Successful return
-/// therefore proves the retired decoder produced the file the archive claimed,
-/// not merely a parseable signal with similar samples.
+/// Callers normally supply archive-manifest size and SHA-256, making successful
+/// return proof that the retired decoder produced the file the archive claimed.
+/// A supervising parent may instead omit SHA-256 only for a caller-owned
+/// staging destination. Such a receipt has `exact_original_bytes == false`;
+/// parent must verify its authenticated logical ContentId before final publish.
 pub fn materialize_exact(request: &MaterializeRequest) -> Result<MaterializeReceipt, LegacyError> {
     use sha2::Digest;
 

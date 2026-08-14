@@ -241,6 +241,9 @@ independently authenticated logical content ID, then publishes through its own
 no-clobber path. In that mode the receipt reports `exact_original_bytes: false`;
 adapter output alone is not completion evidence, and a staging path must never
 be exposed as the final archive destination.
+Callers must require `parent_verified_materialization: true` in the
+`legacy.lml1.v1` capability before omitting the digest; older v1 adapters do
+not support this request variant.
 `max_decoded_bytes` bounds decoded signal buffers, not total process RSS;
 supervising conversion code must enforce a separate process-memory ceiling.
 Publication produces only complete file bytes and is restartable, but does not

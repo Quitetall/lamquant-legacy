@@ -7,6 +7,7 @@
       "inspect": true,
       "forensic_import": true,
       "exact_materialization": false,
+      "parent_verified_materialization": false,
       "semantic_import": true,
       "reverse_export": true,
       "operations": [
@@ -21,6 +22,7 @@
       "inspect": true,
       "forensic_import": true,
       "exact_materialization": true,
+      "parent_verified_materialization": true,
       "semantic_import": true,
       "reverse_export": true,
       "operations": [
@@ -37,6 +39,7 @@
       "inspect": true,
       "forensic_import": true,
       "exact_materialization": false,
+      "parent_verified_materialization": false,
       "semantic_import": true,
       "reverse_export": true,
       "operations": [
@@ -51,6 +54,7 @@
       "inspect": true,
       "forensic_import": true,
       "exact_materialization": false,
+      "parent_verified_materialization": false,
       "semantic_import": true,
       "reverse_export": true,
       "operations": [
@@ -65,6 +69,7 @@
       "inspect": true,
       "forensic_import": true,
       "exact_materialization": false,
+      "parent_verified_materialization": false,
       "semantic_import": true,
       "reverse_export": true,
       "operations": [
@@ -79,6 +84,7 @@
       "inspect": true,
       "forensic_import": true,
       "exact_materialization": false,
+      "parent_verified_materialization": false,
       "semantic_import": true,
       "reverse_export": true,
       "operations": [
@@ -93,6 +99,7 @@
       "inspect": true,
       "forensic_import": true,
       "exact_materialization": false,
+      "parent_verified_materialization": false,
       "semantic_import": true,
       "reverse_export": true,
       "operations": [
@@ -107,6 +114,7 @@
       "inspect": true,
       "forensic_import": true,
       "exact_materialization": false,
+      "parent_verified_materialization": false,
       "semantic_import": true,
       "reverse_export": true,
       "operations": [
@@ -121,6 +129,7 @@
       "inspect": true,
       "forensic_import": true,
       "exact_materialization": false,
+      "parent_verified_materialization": false,
       "semantic_import": true,
       "reverse_export": true,
       "operations": [

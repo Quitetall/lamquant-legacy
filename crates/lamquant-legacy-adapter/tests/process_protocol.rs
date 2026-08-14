@@ -598,6 +598,7 @@ fn exact_materialization_capability_and_process_wire_are_explicit() {
     for capability in &manifest.capabilities {
         let expected = capability.profile == "legacy.lml1.v1";
         assert_eq!(capability.exact_materialization, expected);
+        assert_eq!(capability.parent_verified_materialization, expected);
         assert_eq!(
             capability
                 .operations
@@ -613,7 +614,7 @@ fn exact_materialization_capability_and_process_wire_are_explicit() {
     let (lml, original) = lml1_edf_fixture(temp.path());
     fs::write(&source, &lml).unwrap();
     let request = ProcessRequest::MaterializeExact(MaterializeRequest {
-        source,
+        source: source.clone(),
         destination: destination.clone(),
         accept_fidelity: true,
         expected_sha256: Some(format!("{:x}", Sha256::digest(&original))),
@@ -628,6 +629,24 @@ fn exact_materialization_capability_and_process_wire_are_explicit() {
     assert!(matches!(response, ProcessResponse::OkMaterialization(_)));
     assert_eq!(fs::read(destination).unwrap(), original);
 
+    let staged_destination = temp.path().join("process-candidate.edf");
+    let parent_verified_wire = serde_json::json!({
+        "operation": "materialize-exact",
+        "source": source,
+        "destination": staged_destination,
+        "accept_fidelity": true,
+        "original_size": original.len() as u64,
+        "max_source_bytes": lml.len() as u64,
+        "max_decoded_bytes": 1024 * 1024,
+        "max_output_bytes": original.len() as u64
+    });
+    let response = handle(serde_json::from_value(parent_verified_wire).unwrap());
+    let ProcessResponse::OkMaterialization(receipt) = response else {
+        panic!("parent-verified wire request failed")
+    };
+    assert!(!receipt.exact_original_bytes);
+    assert_eq!(fs::read(staged_destination).unwrap(), original);
+
     let older_v1: Capability = serde_json::from_value(serde_json::json!({
         "profile": "legacy.lml1.v1",
         "detect": true,
@@ -639,6 +658,7 @@ fn exact_materialization_capability_and_process_wire_are_explicit() {
     }))
     .unwrap();
     assert!(!older_v1.exact_materialization);
+    assert!(!older_v1.parent_verified_materialization);
 }
 
 #[test]
