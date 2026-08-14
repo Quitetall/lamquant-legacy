@@ -24,8 +24,8 @@
 // For this first cut all three ride under `legacy-decode` (default ON), so both the
 // frozen reader and the oracle writer are available; the finer read/`legacy-encode`
 // split is a tracked follow-up. Their `crate::{error,lml,lpc,deployment,crc32}` refs
-// now resolve against `lamquant-lml-mcu`, and `crate::{backend,compress_with_mode_parallel}`
-// against `lamquant-lml-desktop`.
+// now resolve against `lamquant-lml-mcu`, while host execution profiles resolve
+// through `lamquant-lml-desktop::backend`.
 #[cfg(feature = "legacy-decode")]
 pub mod container;
 #[cfg(feature = "legacy-decode")]

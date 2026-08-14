@@ -11,7 +11,7 @@
 //! visible to the caller instead of hidden behind an assertion here.
 
 use lamquant_lml_desktop::backend::{compress_with_backend, ComputeBackend};
-use lamquant_lml_desktop::lpc::LpcMode;
+use lamquant_lml_mcu::lpc::LpcMode;
 use sha2::{Digest, Sha256};
 
 /// xorshift64 — deterministic across machines and architectures.

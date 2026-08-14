@@ -31,8 +31,8 @@ legacy-encode = ["legacy-decode", "dep:lamquant-lml-desktop"]
 [dependencies]
 # Kernels + error/lml/lpc/deployment/crc32 — the proven core, CALLED not moved.
 lamquant-lml-mcu.workspace = true
-# The v1 container's parallel encode path (`backend` + `compress_with_mode_parallel`)
-# lives in the Desktop tier; the legacy writer dispatches through it.
+# The v1 container's parallel encode path lives in the Desktop tier; the
+# legacy writer dispatches through its byte-equal backend interface.
 lamquant-lml-desktop = { workspace = true, optional = true }
 # The v1 metadata JSON (`metadata_with_codec_mode`).
 serde_json = { version = "1", features = ["std"] }

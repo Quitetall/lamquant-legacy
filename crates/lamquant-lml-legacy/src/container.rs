@@ -460,11 +460,14 @@ fn encode_into<W: std::io::Write + ?Sized>(
                 lamquant_lml_desktop::backend::ComputeBackend::Firmware => {
                     lml::compress_with_mode(&window, noise_bits, lpc_mode)?
                 }
-                // ADR 0058 carve-full: the parallel path lives in the Desktop
-                // tier, re-exported as `lamquant_lml_desktop::compress_with_mode_parallel`.
+                // ADR 0058 carve-full: the Desktop owner selects its Rayon
+                // execution profile through one byte-equal backend interface.
                 lamquant_lml_desktop::backend::ComputeBackend::Desktop => {
-                    lamquant_lml_desktop::compress_with_mode_parallel(
-                        &window, noise_bits, lpc_mode,
+                    lamquant_lml_desktop::backend::compress_with_backend(
+                        &window,
+                        noise_bits,
+                        lpc_mode,
+                        lamquant_lml_desktop::backend::ComputeBackend::Desktop,
                     )?
                 }
             }
