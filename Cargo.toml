@@ -7,9 +7,9 @@ members = [
     "crates/lamquant-lml-legacy",
     "crates/lamquant-lma-training-legacy",
     "crates/lamquant-op-event-legacy",
-    "crates/lamquant-stage-pass-legacy",
     "crates/lamquant-runtime-legacy",
 ]
+exclude = ["crates/lamquant-stage-pass-legacy"]
 # The ABIR bridge is experimental (ADR 0139/0140): in `members` so it shares the
 # lock + is fmt/clippy/test-gated by semantic-core, but OUT of `default-members`
 # so a bare `cargo build` never pulls it into production.
@@ -19,7 +19,6 @@ default-members = [
     "crates/lamquant-lml-legacy",
     "crates/lamquant-lma-training-legacy",
     "crates/lamquant-op-event-legacy",
-    "crates/lamquant-stage-pass-legacy",
     "crates/lamquant-runtime-legacy",
 ]
 
@@ -31,16 +30,16 @@ license = "AGPL-3.0-or-later"
 repository = "https://github.com/Quitetall/lamquant-legacy"
 
 [workspace.dependencies]
-abir = { git = "https://github.com/Quitetall/ABIR.git", rev = "37cd630497751462030cdc2068548243cf69ffa4", version = "=0.1.0" }
-abir-adapter = { git = "https://github.com/Quitetall/ABIR.git", rev = "37cd630497751462030cdc2068548243cf69ffa4", version = "=0.1.0" }
+abir = { git = "https://github.com/Quitetall/ABIR.git", rev = "e2115200e0e4f284c38aa2afd4578a204cc8f40d", version = "=0.1.0" }
+abir-adapter = { git = "https://github.com/Quitetall/ABIR.git", rev = "e2115200e0e4f284c38aa2afd4578a204cc8f40d", version = "=0.1.0" }
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
-blake3 = { version = "=1.5.5", default-features = false }
+blake3 = { version = "=1.8.2", default-features = false }
 bytemuck = "=1.25.0"
 lamquant-legacy-ir = { path = "crates/lamquant-legacy-ir", version = "=0.1.1" }
 lamquant-lml-legacy = { path = "crates/lamquant-lml-legacy", version = "=0.1.1", default-features = false, features = ["legacy-decode", "legacy-encode", "legacy-tensor-pack"] }
-lamquant-lml-desktop = { git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "75a619809788fa214a2c65311d6f01d21063d475", version = "=0.9.3", features = ["fast"] }
-lamquant-lml-mcu = { git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "75a619809788fa214a2c65311d6f01d21063d475", version = "=0.9.3", default-features = false, features = ["std"] }
-lamquant-lml-archive = { package = "lamquant-lml", git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "75a619809788fa214a2c65311d6f01d21063d475", version = "=0.9.3", default-features = false, features = ["std", "archive"] }
+lamquant-lml-desktop = { git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "42454609ef62b47e0364f5c2fc1c300fbaeaba05", version = "=0.9.3", features = ["fast"] }
+lamquant-lml-mcu = { git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "42454609ef62b47e0364f5c2fc1c300fbaeaba05", version = "=0.9.3", default-features = false, features = ["std"] }
+lamquant-lml-archive = { package = "lamquant-lml", git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "42454609ef62b47e0364f5c2fc1c300fbaeaba05", version = "=0.9.3", default-features = false, features = ["std", "archive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = { version = "0.10", default-features = false }

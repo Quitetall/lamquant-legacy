@@ -1,12 +1,15 @@
 [package]
 name = "lamquant-stage-pass-legacy"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Quitetall/lamquant-legacy"
 publish = false
 description = "Process-isolated facade for LamQuant's retired Stage and Pass API"
 
 [dependencies]
 lamquant-lml-archive = { package = "lamquant-lml", git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "db7ff36aff529886195e067ea9628d3e7a08cd84", default-features = false, features = ["std", "archive"] }
+
+[workspace]
+resolver = "2"
