@@ -59,9 +59,9 @@ async-trait = "0.1"
 thiserror = "1"
 tracing = "0.1.40"
 
-lamquant-core = { package = "lamquant-lml", git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "3d53224c4b524fb058704067db992a7c63c3f323", default-features = false, features = ["archive"], optional = true }
-lamquant-visualization-lsl = { git = "https://github.com/Quitetall/LamQuant-Vision.git", rev = "93e77c26126d1b7ef01824063fae2f8881cf772d", default-features = false, optional = true }
-lamquant-neg = { git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "3d53224c4b524fb058704067db992a7c63c3f323", package = "lamquant-neg", optional = true }
+lamquant-core = { package = "lamquant-lml", git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "5147f1e341830d4a71bde836307e03c885533b47", default-features = false, features = ["archive"], optional = true }
+lamquant-visualization-lsl = { git = "https://github.com/Quitetall/LamQuant-Vision.git", rev = "9e6407f7417f5c0da28c465a61b2ebe10b77efd9", default-features = false, optional = true }
+lamquant-neg = { git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "5147f1e341830d4a71bde836307e03c885533b47", package = "lamquant-neg", optional = true }
 sha2 = { version = "0.10", optional = true }
 notify = { version = "6", default-features = false, features = ["macos_fsevent"], optional = true }
 ed25519-dalek = { version = "2.1", optional = true }
