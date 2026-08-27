@@ -9,7 +9,13 @@ publish = false
 description = "Process-isolated facade for LamQuant's retired Stage and Pass API"
 
 [dependencies]
-lamquant-lml-archive = { path = "../../../codec-lossless/lamquant-lossless", package = "lamquant-lml", default-features = false, features = ["std", "archive"] }
+# FROZEN, and deliberately still a git pin after consolidation. This crate
+# preserves the retired Stage/Pass API at exactly db7ff36a -- the revision its own
+# SOURCE_REVISION constant names -- and `codec_stages`, `pass`, `pipeline` and
+# `pipeline_dsl` no longer exist in the in-tree codec. A path dependency on
+# `codec-lossless/` therefore points at a tree that CANNOT satisfy this crate.
+# Registered in tools/cross_repo_pin_authorities.json under `frozen_pins`.
+lamquant-lml-archive = { package = "lamquant-lml", git = "https://github.com/Quitetall/LamQuant-Lossless.git", rev = "db7ff36aff529886195e067ea9628d3e7a08cd84", default-features = false, features = ["std", "archive"] }
 
 [workspace]
 resolver = "2"
